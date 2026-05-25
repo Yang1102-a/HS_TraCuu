@@ -38,18 +38,15 @@ st.title("🔎 Tra cứu mã HS")
 DATA_FILE = "data.xlsx"
 HISTORY_FILE = "search_history.csv"
 
-
 uploaded_file = st.file_uploader("Upload file Excel", type=["xlsx"])
 
 if uploaded_file:
     with open(DATA_FILE, "wb") as f:
         f.write(uploaded_file.getbuffer())
-
     st.success("Đã lưu file Excel thành công!")
     st.cache_data.clear()
 
 
-# ── Helpers ──────────────────────────────────────────────
 def remove_accents(text):
     text = unicodedata.normalize("NFD", str(text))
     return text.encode("ascii", "ignore").decode("utf-8")
@@ -80,9 +77,7 @@ def normalize_text(text):
         text = text.replace(old, new)
 
     text = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def find_name_col(columns):
@@ -122,9 +117,6 @@ def highlight_text(original_text, query):
         token = m.group(0)
         norm = normalize_text(token)
 
-        if not norm or len(norm) < 2:
-            return token
-
         if norm in query_tokens:
             return f"<mark>{token}</mark>"
 
@@ -153,14 +145,27 @@ def save_history(keyword):
     history.drop_duplicates().head(20).to_csv(HISTORY_FILE, index=False)
 
 
+def delete_history_keyword(keyword):
+    if not os.path.exists(HISTORY_FILE):
+        return
+
+    history = pd.read_csv(HISTORY_FILE)
+    history = history[history["Từ khóa"] != keyword]
+    history.to_csv(HISTORY_FILE, index=False)
+
+
+def clear_history():
+    if os.path.exists(HISTORY_FILE):
+        os.remove(HISTORY_FILE)
+
+
 @st.cache_data
 def load_excel(path):
     xf = pd.ExcelFile(path)
     frames = []
 
     for sheet in xf.sheet_names:
-        df = pd.read_excel(path, sheet_name=sheet)
-        df = df.dropna(how="all")
+        df = pd.read_excel(path, sheet_name=sheet).dropna(how="all")
         df["Sheet"] = sheet
         frames.append(df)
 
@@ -172,7 +177,6 @@ def load_sheet(path, sheet_name):
     return pd.read_excel(path, sheet_name=sheet_name).dropna(how="all")
 
 
-# ── Search scoring mới ──────────────────────────────────
 def token_match_positions(query_tokens, text_tokens):
     positions = []
     used_positions = set()
@@ -196,11 +200,6 @@ def token_match_positions(query_tokens, text_tokens):
 
 
 def longest_ordered_subsequence_score(query_tokens, text_tokens):
-    """
-    Đo mức đúng thứ tự của các từ query trong text.
-    Đúng thứ tự hoàn toàn => 1.0
-    Sai thứ tự nhiều => thấp hơn
-    """
     q_index = 0
     matched = 0
 
@@ -228,18 +227,14 @@ def ordered_match_score(query_norm, text_norm):
     matched_count = len(positions)
     coverage = matched_count / len(q_tokens)
 
-    # Thiếu từ thì không thể điểm cao
     if coverage < 1:
         return round(coverage * 70, 2)
 
     phrase = " ".join(q_tokens)
 
-    # 1. Đủ cụm nguyên văn, đúng thứ tự liên tiếp
-    # Câu dài không bị trừ điểm.
     if phrase in text_norm:
         return 100
 
-    # 2. Đủ từ và đúng thứ tự, nhưng có chữ chen giữa
     ordered_score = longest_ordered_subsequence_score(q_tokens, t_tokens)
 
     if ordered_score == 1:
@@ -247,12 +242,8 @@ def ordered_match_score(query_norm, text_norm):
             max(0, b - a - 1)
             for a, b in zip(positions, positions[1:])
         )
-
-        # càng ít chữ chen giữa càng cao
         return round(max(90, 99 - gaps), 2)
 
-    # 3. Đủ từ nhưng sai thứ tự
-    # Vẫn có điểm, nhưng đứng dưới nhóm đúng thứ tự.
     return round(75 + ordered_score * 10, 2)
 
 
@@ -260,7 +251,6 @@ def run_search(query, search_df, name_col, hs_col):
     q_norm = normalize_text(query)
 
     result = search_df.copy()
-
     result["Tên chuẩn hóa"] = result[name_col].astype(str).apply(normalize_text)
 
     result["Điểm giống"] = result["Tên chuẩn hóa"].apply(
@@ -275,10 +265,7 @@ def run_search(query, search_df, name_col, hs_col):
         .str.replace(r"\.0$", "", regex=True)
     )
 
-    result = result.sort_values(
-        by=["Điểm giống"],
-        ascending=False
-    )
+    result = result.sort_values("Điểm giống", ascending=False)
 
     result = result.drop_duplicates(
         subset=[name_col, hs_col],
@@ -299,13 +286,9 @@ def show_results(top_result, search_text, search_df, name_col, hs_col):
     best_hs = hs_stats.iloc[0]["Mã HS"]
     best_count = hs_stats.iloc[0]["Số lần xuất hiện"]
 
-    st.success(
-        f"💡 Gợi ý mã đáng tin nhất: **{best_hs}** — xuất hiện {best_count} lần"
-    )
+    st.success(f"💡 Gợi ý mã đáng tin nhất: **{best_hs}** — xuất hiện {best_count} lần")
 
     with st.expander("📊 Thống kê mã HS — click để xem sản phẩm"):
-        st.caption("Bấm một mã HS để xem sản phẩm có mã đó trong kết quả.")
-
         for _, r in hs_stats.iterrows():
             col1, col2, col3 = st.columns([3, 2, 2])
 
@@ -325,25 +308,21 @@ def show_results(top_result, search_text, search_df, name_col, hs_col):
     for _, row in top_result.iterrows():
         highlighted = highlight_text(row[name_col], search_text)
 
-        st.markdown(
-            f"""
-            <div class="card">
-                <div class="hs">Mã HS: {html.escape(str(row[hs_col]))}</div>
-                <p><b>Tên hàng:</b> {highlighted}</p>
-                <p class="score">
-                    Độ giống: {round(row['Điểm giống'], 1)}%
-                    | Sheet: {html.escape(str(row['Sheet']))}
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        st.markdown(f"""
+        <div class="card">
+            <div class="hs">Mã HS: {html.escape(str(row[hs_col]))}</div>
+            <p><b>Tên hàng:</b> {highlighted}</p>
+            <p class="score">
+                Độ giống: {round(row['Điểm giống'], 1)}%
+                | Sheet: {html.escape(str(row['Sheet']))}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
 
         with st.expander("Xem toàn bộ thông tin dòng này"):
             st.write(row.drop(labels=["Tên chuẩn hóa"]).to_frame("Giá trị"))
 
 
-# ── Main ─────────────────────────────────────────────────
 if os.path.exists(DATA_FILE):
     search_df, sheet_names = load_excel(DATA_FILE)
 
@@ -354,9 +333,7 @@ if os.path.exists(DATA_FILE):
 
     with tab_search:
         if "search_from_history" in st.session_state:
-            st.session_state["search_text"] = st.session_state.pop(
-                "search_from_history"
-            )
+            st.session_state["search_text"] = st.session_state.pop("search_from_history")
 
         search_text = st.text_input(
             "🔎 Nhập tên hàng cần tra",
@@ -374,76 +351,70 @@ if os.path.exists(DATA_FILE):
                 st.error("Không tìm thấy cột mã HS.")
 
             else:
-                top_result = run_search(
-                    search_text,
-                    search_df,
-                    name_col,
-                    hs_col
-                )
-
+                top_result = run_search(search_text, search_df, name_col, hs_col)
                 st.session_state["last_top_result"] = top_result
 
                 hs_filter_val = st.session_state.get("hs_filter", "")
 
                 if hs_filter_val:
-                    st.subheader(
-                        f"📦 Sản phẩm có mã HS: {hs_filter_val} — trong kết quả tìm kiếm"
-                    )
+                    st.subheader(f"📦 Sản phẩm có mã HS: {hs_filter_val}")
 
                     if st.button("← Quay lại toàn bộ kết quả"):
                         st.session_state["hs_filter"] = ""
                         st.rerun()
 
-                    else:
-                        filtered = top_result[top_result[hs_col] == hs_filter_val]
+                    filtered = top_result[top_result[hs_col] == hs_filter_val]
 
-                        st.info(f"Tìm thấy **{len(filtered)}** sản phẩm")
+                    st.info(f"Tìm thấy **{len(filtered)}** sản phẩm")
 
-                        for _, row in filtered.iterrows():
-                            highlighted = highlight_text(row[name_col], search_text)
+                    for _, row in filtered.iterrows():
+                        highlighted = highlight_text(row[name_col], search_text)
 
-                            st.markdown(
-                                f"""
-                                <div class="card">
-                                    <div class="hs">Mã HS: {html.escape(str(row[hs_col]))}</div>
-                                    <p><b>Tên hàng:</b> {highlighted}</p>
-                                    <p class="score">
-                                        Độ giống: {round(row['Điểm giống'], 1)}%
-                                        | Sheet: {html.escape(str(row['Sheet']))}
-                                    </p>
-                                </div>
-                                """,
-                                unsafe_allow_html=True
-                            )
+                        st.markdown(f"""
+                        <div class="card">
+                            <div class="hs">Mã HS: {html.escape(str(row[hs_col]))}</div>
+                            <p><b>Tên hàng:</b> {highlighted}</p>
+                            <p class="score">
+                                Độ giống: {round(row['Điểm giống'], 1)}%
+                                | Sheet: {html.escape(str(row['Sheet']))}
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
 
                 else:
                     show_results(top_result, search_text, search_df, name_col, hs_col)
 
         else:
             st.session_state["hs_filter"] = ""
-
             st.info("Nhập tên hàng vào ô bên trên để bắt đầu tra cứu.")
 
             if os.path.exists(HISTORY_FILE):
                 history_df = pd.read_csv(HISTORY_FILE)
 
                 with st.expander("🕘 Lịch sử tìm kiếm — click để tra lại", expanded=True):
-                    st.caption("Bấm nút để tìm kiếm lại từ khóa cũ.")
+                    st.caption("Bấm 🔍 để tìm lại, bấm 🗑 để xóa từng dòng.")
+
+                    if st.button("🧹 Xóa toàn bộ lịch sử"):
+                        clear_history()
+                        st.rerun()
 
                     for _, hr in history_df.iterrows():
                         kw = hr["Từ khóa"]
 
-                        c1, c2 = st.columns([5, 1])
+                        c1, c2, c3 = st.columns([5, 1, 1])
 
                         c1.write(kw)
 
-                        if c2.button("🔍", key=f"hist_{kw}"):
+                        if c2.button("🔍", key=f"hist_search_{kw}"):
                             st.session_state["search_from_history"] = kw
+                            st.rerun()
+
+                        if c3.button("🗑", key=f"hist_delete_{kw}"):
+                            delete_history_keyword(kw)
                             st.rerun()
 
     with tab_sheet:
         selected_sheet = st.selectbox("Chọn sheet để xem", sheet_names)
-
         view_df = load_sheet(DATA_FILE, selected_sheet)
 
         st.caption(
