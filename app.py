@@ -432,30 +432,29 @@ if os.path.exists(DATA_FILE):
                 f"Sheet: **{selected_sheet}** — {len(view_df)} dòng | "
                 f"Tổng {len(sheet_names)} sheet"
             )
-            st.caption("💡 Bấm nút **🔍** ở cột đầu để xem thẻ chi tiết của dòng đó")
 
-            # Hiển thị từng dòng: nút 🔍 + thông tin tóm tắt
-            display_cols = [c for c in view_df.columns if c not in ("Sheet",)]
+            # Bảng gọn như cũ
+            display_cols = [c for c in view_df.columns if c != "Sheet"]
+            table_df = view_df[display_cols].reset_index(drop=True)
+            table_df.index = table_df.index + 1
+            st.dataframe(table_df, use_container_width=True, hide_index=False)
 
-            # Header giả
-            h_cols = st.columns([1, 3, 2])
-            h_cols[0].markdown("**#**")
-            h_cols[1].markdown(f"**{sheet_name_col or 'Tên hàng'}**")
-            h_cols[2].markdown(f"**{sheet_hs_col or 'Mã HS'}**")
-            st.markdown("<hr style='margin:4px 0 8px 0;border-color:#333'>", unsafe_allow_html=True)
-
-            for idx, row in view_df.iterrows():
-                _name = str(row[sheet_name_col])[:80] + "…" if sheet_name_col and len(str(row[sheet_name_col])) > 80 else str(row.get(sheet_name_col, "—"))
-                _hs   = str(row[sheet_hs_col]) if sheet_hs_col else "—"
-
-                c_btn, c_name, c_hs = st.columns([1, 3, 2])
-                with c_btn:
-                    if st.button("🔍", key=f"detail_btn_{selected_sheet}_{idx}"):
-                        st.session_state["sheet_detail_row"]   = idx
-                        st.session_state["sheet_detail_sheet"] = selected_sheet
-                        st.rerun()
-                c_name.write(_name)
-                c_hs.write(_hs)
+            # Mở thẻ: nhập số dòng → bấm nút
+            st.markdown("---")
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                row_num = st.number_input(
+                    "Nhập số thứ tự dòng muốn xem thẻ",
+                    min_value=1, max_value=len(view_df), step=1,
+                    key=f"row_input_{selected_sheet}",
+                )
+            with c2:
+                st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
+                if st.button("🃏 Mở thẻ chi tiết", key=f"open_card_{selected_sheet}", type="primary"):
+                    st.session_state["sheet_detail_row"]   = int(row_num) - 1
+                    st.session_state["sheet_detail_sheet"] = selected_sheet
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
 
 else:
     st.info("Hãy upload file Excel để bắt đầu.")
