@@ -37,12 +37,30 @@ def clean_username(username):
     return re.sub(r"[^a-zA-Z0-9_-]", "", username)
 
 
-def save_users(users):
-    users[ADMIN_USER] = {
+def default_admin():
+    return {
         "password": hash_pw(ADMIN_PASS_DEFAULT),
         "plain_password": ADMIN_PASS_DEFAULT,
-        "role": "admin"
+        "role": "admin",
+        "locked": False
     }
+
+
+def normalize_user_data(users):
+    users[ADMIN_USER] = default_admin()
+
+    for uname, info in users.items():
+        if uname == ADMIN_USER:
+            continue
+        info.setdefault("role", "user")
+        info.setdefault("locked", False)
+        info.setdefault("plain_password", "")
+
+    return users
+
+
+def save_users(users):
+    users = normalize_user_data(users)
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
 
@@ -54,13 +72,20 @@ def load_users():
     else:
         users = {}
 
-    users[ADMIN_USER] = {
-        "password": hash_pw(ADMIN_PASS_DEFAULT),
-        "plain_password": ADMIN_PASS_DEFAULT,
-        "role": "admin"
-    }
+    users = normalize_user_data(users)
     save_users(users)
     return users
+
+
+def default_settings():
+    return {
+        "allow_register": True,
+        "allow_self_delete": True,
+        "allow_user_download": True,
+        "allow_change_password": True,
+        "show_history": True,
+        "allow_view_sheet": True
+    }
 
 
 def save_settings(settings):
@@ -71,11 +96,14 @@ def save_settings(settings):
 def load_settings():
     if SETTINGS_FILE.exists():
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            settings = json.load(f)
+    else:
+        settings = {}
 
-    settings = {"allow_register": True}
-    save_settings(settings)
-    return settings
+    base = default_settings()
+    base.update(settings)
+    save_settings(base)
+    return base
 
 
 def user_dir(username):
@@ -326,6 +354,10 @@ def show_login():
             ok_plain = username in users and users[username].get("plain_password") == password
 
             if ok_hash or ok_plain:
+                if users[username].get("locked", False):
+                    st.error("Tài khoản đã bị khóa. Liên hệ admin.")
+                    return
+
                 st.session_state.clear()
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
@@ -357,7 +389,8 @@ def show_login():
                     users[new_user] = {
                         "password": hash_pw(new_pass),
                         "plain_password": new_pass,
-                        "role": "user"
+                        "role": "user",
+                        "locked": False
                     }
                     save_users(users)
                     user_dir(new_user)
@@ -375,26 +408,42 @@ def show_admin_panel():
         st.subheader("Quản lý tài khoản")
 
         for uname, info in users.items():
-            c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 3, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 3, 2, 1])
 
             c1.write(f"**{uname}**")
             c2.write(info["role"])
 
             if uname == ADMIN_USER:
-                c3.success("🔒 Tài khoản hệ thống")
-                c4.info("Không thể đổi mật khẩu admin")
+                c3.success("🔒 Hệ thống")
+                c4.info("Không thể đổi MK admin")
+                c5.info("Luôn hoạt động")
             else:
-                c3.code(info.get("plain_password", "Không có MK rõ"))
+                status = "🔴 Đã khóa" if info.get("locked", False) else "🟢 Hoạt động"
+                c3.write(status)
+                c4.code(info.get("plain_password", "Không có MK rõ"))
 
-                new_pw = c4.text_input(
-                    "MK mới",
+                if info.get("locked", False):
+                    if c5.button("🔓 Mở khóa", key=f"unlock_{uname}"):
+                        users[uname]["locked"] = False
+                        save_users(users)
+                        st.success(f"Đã mở khóa {uname}")
+                        st.rerun()
+                else:
+                    if c5.button("🔒 Khóa", key=f"lock_{uname}"):
+                        users[uname]["locked"] = True
+                        save_users(users)
+                        st.success(f"Đã khóa {uname}")
+                        st.rerun()
+
+                new_pw = st.text_input(
+                    f"MK mới cho {uname}",
                     type="password",
                     key=f"reset_pw_{uname}",
                     placeholder="Nhập MK mới",
                     label_visibility="collapsed"
                 )
 
-                if c4.button("Reset MK", key=f"reset_btn_{uname}"):
+                if st.button("Reset MK", key=f"reset_btn_{uname}"):
                     if not new_pw:
                         st.warning("Nhập mật khẩu mới trước.")
                     else:
@@ -406,7 +455,7 @@ def show_admin_panel():
 
                 confirm_key = f"confirm_delete_{uname}"
 
-                if c5.button("🗑", key=f"delete_user_{uname}"):
+                if c6.button("🗑", key=f"delete_user_{uname}"):
                     st.session_state[confirm_key] = True
 
                 if st.session_state.get(confirm_key):
@@ -425,6 +474,8 @@ def show_admin_panel():
                     if col_no.button("❌ Hủy", key=f"no_delete_{uname}"):
                         st.session_state[confirm_key] = False
                         st.rerun()
+
+            st.markdown("---")
 
     with tab_files:
         st.subheader("Xem / tải / upload dữ liệu từng user")
@@ -479,17 +530,28 @@ def show_admin_panel():
         st.subheader("Cài đặt hệ thống")
 
         settings = load_settings()
-        allow_register = settings.get("allow_register", True)
 
-        new_allow = st.toggle(
-            "Cho phép người dùng tự đăng ký tài khoản",
-            value=allow_register
-        )
+        options = [
+            ("allow_register", "Cho phép người dùng tự đăng ký tài khoản"),
+            ("allow_self_delete", "Cho phép user tự xóa tài khoản"),
+            ("allow_user_download", "Cho phép user tải file dữ liệu của mình"),
+            ("allow_change_password", "Cho phép user đổi mật khẩu"),
+            ("show_history", "Hiển thị lịch sử tìm kiếm"),
+            ("allow_view_sheet", "Cho phép user xem sheet dữ liệu"),
+        ]
 
-        if new_allow != allow_register:
-            settings["allow_register"] = new_allow
+        changed = False
+
+        for key, label in options:
+            old_val = settings.get(key, True)
+            new_val = st.toggle(label, value=old_val, key=f"setting_{key}")
+            if new_val != old_val:
+                settings[key] = new_val
+                changed = True
+
+        if changed:
             save_settings(settings)
-            st.success("Đã cập nhật cài đặt đăng ký.")
+            st.success("Đã cập nhật cài đặt hệ thống.")
             st.rerun()
 
 
@@ -497,6 +559,7 @@ def show_admin_panel():
 def show_search_page(username):
     st.title("🔎 Tra cứu mã HS")
     path = data_file(username)
+    settings = load_settings()
 
     search_key = f"search_text_{username}"
 
@@ -585,27 +648,28 @@ def show_search_page(username):
                 st.write(show_row.to_frame("Giá trị"))
 
     else:
-        hpath = history_file(username)
-        if hpath.exists():
-            hist = pd.read_csv(hpath)
+        if settings.get("show_history", True):
+            hpath = history_file(username)
+            if hpath.exists():
+                hist = pd.read_csv(hpath)
 
-            with st.expander("🕘 Lịch sử tìm kiếm", expanded=True):
-                if st.button("🧹 Xóa toàn bộ lịch sử", key=f"clear_history_{username}"):
-                    clear_history(username)
-                    st.rerun()
-
-                for i, r in hist.iterrows():
-                    kw = r["Từ khóa"]
-                    c1, c2, c3 = st.columns([5, 1, 1])
-                    c1.write(kw)
-
-                    if c2.button("🔍", key=f"hist_search_{username}_{i}_{kw}"):
-                        st.session_state[search_key] = kw
+                with st.expander("🕘 Lịch sử tìm kiếm", expanded=True):
+                    if st.button("🧹 Xóa toàn bộ lịch sử", key=f"clear_history_{username}"):
+                        clear_history(username)
                         st.rerun()
 
-                    if c3.button("🗑", key=f"hist_delete_{username}_{i}_{kw}"):
-                        delete_history(username, kw)
-                        st.rerun()
+                    for i, r in hist.iterrows():
+                        kw = r["Từ khóa"]
+                        c1, c2, c3 = st.columns([5, 1, 1])
+                        c1.write(kw)
+
+                        if c2.button("🔍", key=f"hist_search_{username}_{i}_{kw}"):
+                            st.session_state[search_key] = kw
+                            st.rerun()
+
+                        if c3.button("🗑", key=f"hist_delete_{username}_{i}_{kw}"):
+                            delete_history(username, kw)
+                            st.rerun()
 
 
 # ================= SHEET =================
@@ -710,6 +774,7 @@ def show_main_app():
     username = st.session_state["username"]
     role = st.session_state["role"]
     path = data_file(username)
+    settings = load_settings()
 
     with st.sidebar:
         st.markdown(f"### 👤 {username}")
@@ -735,7 +800,7 @@ def show_main_app():
                 st.success("Đã lưu file Excel.")
                 st.rerun()
 
-            if path.exists():
+            if path.exists() and settings.get("allow_user_download", True):
                 with open(path, "rb") as f:
                     st.download_button(
                         "⬇️ Tải file hiện tại",
@@ -747,47 +812,49 @@ def show_main_app():
 
             st.markdown("---")
 
-            with st.expander("🔑 Đổi mật khẩu"):
-                old_pw = st.text_input("Mật khẩu cũ", type="password", key=f"old_pw_{username}")
-                new_pw = st.text_input("Mật khẩu mới", type="password", key=f"new_pw_{username}")
-                new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password", key=f"new_pw2_{username}")
+            if settings.get("allow_change_password", True):
+                with st.expander("🔑 Đổi mật khẩu"):
+                    old_pw = st.text_input("Mật khẩu cũ", type="password", key=f"old_pw_{username}")
+                    new_pw = st.text_input("Mật khẩu mới", type="password", key=f"new_pw_{username}")
+                    new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password", key=f"new_pw2_{username}")
 
-                if st.button("Lưu mật khẩu", key=f"save_pw_{username}"):
-                    users = load_users()
+                    if st.button("Lưu mật khẩu", key=f"save_pw_{username}"):
+                        users = load_users()
 
-                    ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
+                        ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
 
-                    if not ok_old:
-                        st.error("Mật khẩu cũ sai.")
-                    elif not new_pw:
-                        st.error("Mật khẩu mới không được trống.")
-                    elif new_pw != new_pw2:
-                        st.error("Mật khẩu mới không khớp.")
-                    else:
-                        users[username]["password"] = hash_pw(new_pw)
-                        users[username]["plain_password"] = new_pw
-                        save_users(users)
-                        st.success("Đã đổi mật khẩu.")
+                        if not ok_old:
+                            st.error("Mật khẩu cũ sai.")
+                        elif not new_pw:
+                            st.error("Mật khẩu mới không được trống.")
+                        elif new_pw != new_pw2:
+                            st.error("Mật khẩu mới không khớp.")
+                        else:
+                            users[username]["password"] = hash_pw(new_pw)
+                            users[username]["plain_password"] = new_pw
+                            save_users(users)
+                            st.success("Đã đổi mật khẩu.")
 
-            with st.expander("⚠️ Xóa tài khoản"):
-                st.warning("Xóa tài khoản sẽ xóa toàn bộ file Excel và lịch sử tìm kiếm của bạn.")
+            if settings.get("allow_self_delete", True):
+                with st.expander("⚠️ Xóa tài khoản"):
+                    st.warning("Xóa tài khoản sẽ xóa toàn bộ file Excel và lịch sử tìm kiếm của bạn.")
 
-                if st.button("🗑 Xóa tài khoản của tôi", key=f"self_delete_{username}"):
-                    st.session_state[f"confirm_self_delete_{username}"] = True
+                    if st.button("🗑 Xóa tài khoản của tôi", key=f"self_delete_{username}"):
+                        st.session_state[f"confirm_self_delete_{username}"] = True
 
-                if st.session_state.get(f"confirm_self_delete_{username}"):
-                    st.error("Bạn chắc chắn muốn xóa tài khoản này chứ? Dữ liệu sẽ mất vĩnh viễn.")
+                    if st.session_state.get(f"confirm_self_delete_{username}"):
+                        st.error("Bạn chắc chắn muốn xóa tài khoản này chứ? Dữ liệu sẽ mất vĩnh viễn.")
 
-                    c1, c2 = st.columns(2)
+                        c1, c2 = st.columns(2)
 
-                    if c1.button("✅ Xác nhận xóa", key=f"yes_self_delete_{username}"):
-                        delete_user_completely(username)
-                        st.session_state.clear()
-                        st.rerun()
+                        if c1.button("✅ Xác nhận xóa", key=f"yes_self_delete_{username}"):
+                            delete_user_completely(username)
+                            st.session_state.clear()
+                            st.rerun()
 
-                    if c2.button("❌ Hủy", key=f"no_self_delete_{username}"):
-                        st.session_state[f"confirm_self_delete_{username}"] = False
-                        st.rerun()
+                        if c2.button("❌ Hủy", key=f"no_self_delete_{username}"):
+                            st.session_state[f"confirm_self_delete_{username}"] = False
+                            st.rerun()
 
         st.markdown("---")
 
@@ -799,13 +866,16 @@ def show_main_app():
     if role == "admin":
         show_admin_panel()
     else:
-        tab_search, tab_sheet = st.tabs(["🔎 Tra cứu", "📋 Xem sheet"])
+        if settings.get("allow_view_sheet", True):
+            tab_search, tab_sheet = st.tabs(["🔎 Tra cứu", "📋 Xem sheet"])
 
-        with tab_search:
+            with tab_search:
+                show_search_page(username)
+
+            with tab_sheet:
+                show_sheet_page(username)
+        else:
             show_search_page(username)
-
-        with tab_sheet:
-            show_sheet_page(username)
 
 
 # ================= ROUTER =================
