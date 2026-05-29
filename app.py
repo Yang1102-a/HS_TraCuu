@@ -1,15 +1,9 @@
 import streamlit as st
 import pandas as pd
-import os
-import re
-import json
-import html
-import hashlib
-import unicodedata
+import re, json, html, hashlib, unicodedata
 from pathlib import Path
 from difflib import SequenceMatcher
 
-# ================= CONFIG =================
 st.set_page_config(page_title="Tra cứu mã HS", layout="wide")
 
 BASE_DIR = Path(__file__).parent
@@ -22,17 +16,11 @@ ADMIN_PASS_DEFAULT = "000"
 
 st.markdown("""
 <style>
-.stApp { background: #0f1117; color: #eee; }
-.card {
-    border: 1px solid #333846;
-    border-radius: 16px;
-    padding: 16px;
-    margin-bottom: 12px;
-    background: #171a22;
-}
-.hs { font-size: 25px; font-weight: 800; color: #7CFFB2; }
-.score { color: #aaa; font-size: 13px; }
-mark { background: #ffe066; color: black; padding: 2px 4px; border-radius: 4px; }
+.stApp { background:#0f1117; color:#eee; }
+.card { border:1px solid #333846; border-radius:16px; padding:16px; margin-bottom:12px; background:#171a22; }
+.hs { font-size:25px; font-weight:800; color:#7CFFB2; }
+.score { color:#aaa; font-size:13px; }
+mark { background:#ffe066; color:black; padding:2px 4px; border-radius:4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,6 +48,7 @@ def load_users():
     users = {
         ADMIN_USER: {
             "password": hash_pw(ADMIN_PASS_DEFAULT),
+            "plain_password": ADMIN_PASS_DEFAULT,
             "role": "admin"
         }
     }
@@ -116,39 +105,25 @@ def normalize_text(text):
         text = text.replace(old, new)
 
     text = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def format_hs(value):
     if pd.isna(value):
         return ""
-
     s = str(value).strip()
-
     if s.endswith(".0"):
         s = s[:-2]
-
-    s = re.sub(r"\D", "", s)
-    return s
+    return re.sub(r"\D", "", s)
 
 
 def find_name_col(columns):
-    keys = [
-        "tên hàng", "ten hang",
-        "mô tả", "mo ta",
-        "description",
-        "name",
-        "tên", "ten"
-    ]
-
+    keys = ["tên hàng", "ten hang", "mô tả", "mo ta", "description", "name", "tên", "ten"]
     for key in keys:
-        key_norm = normalize_text(key)
+        k = normalize_text(key)
         for col in columns:
-            col_norm = normalize_text(col)
-            if key_norm in col_norm:
+            if k in normalize_text(col):
                 return col
-
     return None
 
 
@@ -159,11 +134,9 @@ def find_hs_col(columns):
             return col
         if "mahs" in t or "hscode" in t:
             return col
-
     for col in columns:
         if "hs" in str(col).lower():
             return col
-
     return None
 
 
@@ -173,10 +146,8 @@ def similarity_score(query, text):
 
     if not q or not t:
         return 0
-
     if q == t:
         return 100
-
     if q in t:
         return 96
 
@@ -185,10 +156,8 @@ def similarity_score(query, text):
 
     matched = 0
     for qt in q_tokens:
-        for tt in t_tokens:
-            if qt == tt or qt in tt or tt in qt:
-                matched += 1
-                break
+        if any(qt == tt or qt in tt or tt in qt for tt in t_tokens):
+            matched += 1
 
     token_score = matched / len(q_tokens) * 90 if q_tokens else 0
     seq_score = SequenceMatcher(None, q, t).ratio() * 100
@@ -206,10 +175,8 @@ def highlight_text(original, query):
     def repl(m):
         word = m.group(0)
         norm = normalize_text(word)
-
         if any(q in norm or norm in q for q in q_tokens):
             return f"<mark>{html.escape(word)}</mark>"
-
         return html.escape(word)
 
     return re.sub(r"\S+", repl, text)
@@ -219,7 +186,6 @@ def highlight_text(original, query):
 @st.cache_data(show_spinner=False)
 def load_excel_all(path_str):
     path = Path(path_str)
-
     if not path.exists():
         raise FileNotFoundError("Không tìm thấy file Excel.")
 
@@ -229,10 +195,8 @@ def load_excel_all(path_str):
     for sheet in xf.sheet_names:
         df = pd.read_excel(path, sheet_name=sheet, dtype=str)
         df = df.dropna(how="all")
-
         if df.empty:
             continue
-
         df["Sheet"] = sheet
         frames.append(df)
 
@@ -254,7 +218,6 @@ def run_search(query, df):
 
     if not name_col:
         raise Exception("Không tìm thấy cột tên hàng.")
-
     if not hs_col:
         raise Exception("Không tìm thấy cột mã HS.")
 
@@ -299,7 +262,6 @@ def delete_history(username, keyword):
     path = history_file(username)
     if not path.exists():
         return
-
     df = pd.read_csv(path)
     df = df[df["Từ khóa"] != keyword]
     df.to_csv(path, index=False)
@@ -308,7 +270,6 @@ def delete_history(username, keyword):
 # ================= LOGIN =================
 def show_login():
     st.title("🔐 Đăng nhập")
-
     users = load_users()
 
     tab_login, tab_register = st.tabs(["Đăng nhập", "Đăng ký"])
@@ -320,7 +281,10 @@ def show_login():
         if st.button("Đăng nhập", type="primary", use_container_width=True):
             username = clean_username(username)
 
-            if username in users and users[username]["password"] == hash_pw(password):
+            ok_hash = username in users and users[username].get("password") == hash_pw(password)
+            ok_plain = username in users and users[username].get("plain_password") == password
+
+            if ok_hash or ok_plain:
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
                 st.session_state["role"] = users[username]["role"]
@@ -347,6 +311,7 @@ def show_login():
             else:
                 users[new_user] = {
                     "password": hash_pw(new_pass),
+                    "plain_password": new_pass,
                     "role": "user"
                 }
                 save_users(users)
@@ -357,7 +322,6 @@ def show_login():
 # ================= ADMIN =================
 def show_admin_panel():
     st.title("👑 Admin Panel")
-
     users = load_users()
 
     tab_users, tab_files = st.tabs(["👤 Tài khoản", "📁 Dữ liệu user"])
@@ -366,38 +330,36 @@ def show_admin_panel():
         st.subheader("Quản lý tài khoản")
 
         for uname, info in users.items():
-            c1, c2, c3, c4 = st.columns([3, 2, 3, 1])
+            c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 3, 1])
 
             c1.write(f"**{uname}**")
             c2.write(info["role"])
+            c3.code(info.get("plain_password", "Không có MK rõ"))
 
-            with c3:
-                new_pw = st.text_input(
-                    "Mật khẩu mới",
-                    type="password",
-                    key=f"reset_pw_{uname}",
-                    placeholder="Nhập MK mới",
-                    label_visibility="collapsed"
-                )
+            new_pw = c4.text_input(
+                "MK mới",
+                type="password",
+                key=f"reset_pw_{uname}",
+                placeholder="Nhập MK mới",
+                label_visibility="collapsed"
+            )
 
-                if st.button("Reset MK", key=f"reset_btn_{uname}"):
-                    if not new_pw:
-                        st.warning("Nhập mật khẩu mới trước.")
-                    else:
-                        users[uname]["password"] = hash_pw(new_pw)
-                        save_users(users)
-                        st.success(f"Đã reset mật khẩu cho {uname}")
-                        st.rerun()
+            if c4.button("Reset MK", key=f"reset_btn_{uname}"):
+                if not new_pw:
+                    st.warning("Nhập mật khẩu mới trước.")
+                else:
+                    users[uname]["password"] = hash_pw(new_pw)
+                    users[uname]["plain_password"] = new_pw
+                    save_users(users)
+                    st.success(f"Đã reset mật khẩu cho {uname}")
+                    st.rerun()
 
-            with c4:
-                if uname != ADMIN_USER:
-                    if st.button("Xóa", key=f"delete_user_{uname}"):
-                        del users[uname]
-                        save_users(users)
-                        st.success(f"Đã xóa {uname}")
-                        st.rerun()
-
-        st.info("Không xem được mật khẩu cũ vì mật khẩu được mã hóa hash. Admin chỉ reset mật khẩu.")
+            if uname != ADMIN_USER:
+                if c5.button("Xóa", key=f"delete_user_{uname}"):
+                    del users[uname]
+                    save_users(users)
+                    st.success(f"Đã xóa {uname}")
+                    st.rerun()
 
     with tab_files:
         st.subheader("Xem / tải / upload dữ liệu từng user")
@@ -430,29 +392,23 @@ def show_admin_panel():
         else:
             st.warning("User này chưa có file dữ liệu.")
 
-        uploaded = st.file_uploader(
-            f"Upload Excel cho {target_user}",
-            type=["xlsx"],
-            key=f"admin_upload_{target_user}"
-        )
+        uploaded = st.file_uploader(f"Upload Excel cho {target_user}", type=["xlsx"], key=f"admin_upload_{target_user}")
 
         if uploaded:
             with open(path, "wb") as f:
                 f.write(uploaded.getbuffer())
-
             st.cache_data.clear()
             st.success("Đã upload file.")
             st.rerun()
 
 
-# ================= SEARCH PAGE =================
+# ================= SEARCH =================
 def show_search_page(username):
     st.title("🔎 Tra cứu mã HS")
-
     path = data_file(username)
 
     if not path.exists():
-        st.info("Chưa có file dữ liệu. Upload file Excel ở sidebar trước.")
+        st.info("Chưa có file dữ liệu. Upload Excel ở sidebar trước.")
         return
 
     try:
@@ -537,7 +493,6 @@ def show_search_page(username):
 
     else:
         hpath = history_file(username)
-
         if hpath.exists():
             hist = pd.read_csv(hpath)
 
@@ -546,25 +501,23 @@ def show_search_page(username):
                     clear_history(username)
                     st.rerun()
 
-                for _, r in hist.iterrows():
+                for i, r in hist.iterrows():
                     kw = r["Từ khóa"]
                     c1, c2, c3 = st.columns([5, 1, 1])
-
                     c1.write(kw)
 
-                    if c2.button("🔍", key=f"hist_search_{kw}"):
+                    if c2.button("🔍", key=f"hist_search_{i}_{kw}"):
                         st.session_state["search_text"] = kw
                         st.rerun()
 
-                    if c3.button("🗑", key=f"hist_delete_{kw}"):
+                    if c3.button("🗑", key=f"hist_delete_{i}_{kw}"):
                         delete_history(username, kw)
                         st.rerun()
 
 
-# ================= SHEET PAGE =================
+# ================= SHEET =================
 def show_sheet_page(username):
     st.title("📋 Xem dữ liệu sheet")
-
     path = data_file(username)
 
     if not path.exists():
@@ -599,6 +552,11 @@ def show_sheet_page(username):
 
     st.caption(f"Sheet **{selected_sheet}** — {len(df)} dòng")
 
+    detail_key = f"opened_row_{selected_sheet}"
+
+    if detail_key not in st.session_state:
+        st.session_state[detail_key] = None
+
     row_num = st.number_input(
         "Mở chi tiết dòng",
         min_value=1,
@@ -608,7 +566,12 @@ def show_sheet_page(username):
     )
 
     if st.button("🃏 Mở thẻ dòng này"):
-        row = df.iloc[int(row_num) - 1]
+        st.session_state[detail_key] = int(row_num) - 1
+        st.rerun()
+
+    if st.session_state[detail_key] is not None:
+        idx = st.session_state[detail_key]
+        row = df.iloc[idx]
 
         name_col = find_name_col(df.columns)
         hs_col = find_hs_col(df.columns)
@@ -616,10 +579,27 @@ def show_sheet_page(username):
         name = str(row[name_col]) if name_col else "—"
         hs = str(row[hs_col]) if hs_col else "—"
 
+        c1, c2, c3 = st.columns([1, 1, 4])
+
+        if c1.button("❌ Đóng thẻ"):
+            st.session_state[detail_key] = None
+            st.rerun()
+
+        if idx > 0:
+            if c2.button("⬅ Dòng trước"):
+                st.session_state[detail_key] = idx - 1
+                st.rerun()
+
+        if idx < len(df) - 1:
+            if c3.button("Dòng tiếp ➡"):
+                st.session_state[detail_key] = idx + 1
+                st.rerun()
+
         st.markdown(f"""
         <div class="card">
             <div class="hs">Mã HS: {html.escape(hs)}</div>
             <p><b>Tên hàng:</b><br>{html.escape(name)}</p>
+            <p class="score">Sheet: {html.escape(selected_sheet)} | Dòng: {idx + 1}</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -631,16 +611,14 @@ def show_sheet_page(username):
     st.dataframe(table, use_container_width=True)
 
 
-# ================= MAIN APP =================
+# ================= MAIN =================
 def show_main_app():
     username = st.session_state["username"]
     role = st.session_state["role"]
-
     path = data_file(username)
 
     with st.sidebar:
         st.markdown(f"### 👤 {username}")
-
         if role == "admin":
             st.markdown("👑 Admin")
 
@@ -657,7 +635,6 @@ def show_main_app():
         if uploaded:
             with open(path, "wb") as f:
                 f.write(uploaded.getbuffer())
-
             st.cache_data.clear()
             st.success("Đã lưu file Excel.")
             st.rerun()
@@ -681,7 +658,9 @@ def show_main_app():
             if st.button("Lưu mật khẩu"):
                 users = load_users()
 
-                if users[username]["password"] != hash_pw(old_pw):
+                ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
+
+                if not ok_old:
                     st.error("Mật khẩu cũ sai.")
                 elif not new_pw:
                     st.error("Mật khẩu mới không được trống.")
@@ -689,6 +668,7 @@ def show_main_app():
                     st.error("Mật khẩu mới không khớp.")
                 else:
                     users[username]["password"] = hash_pw(new_pw)
+                    users[username]["plain_password"] = new_pw
                     save_users(users)
                     st.success("Đã đổi mật khẩu.")
 
@@ -707,7 +687,6 @@ def show_main_app():
 
         with tab_admin:
             show_admin_panel()
-
     else:
         tab_search, tab_sheet = st.tabs(["🔎 Tra cứu", "📋 Xem sheet"])
 
