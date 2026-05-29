@@ -234,9 +234,16 @@ def show_results(top_result, search_text, search_df, name_col, hs_col):
                 st.session_state["hs_filter"] = r["Mã HS"]
                 st.rerun()
 
-    with st.expander("🧩 Nhóm các mã HS khác nhau"):
-        grouped = top_result.groupby(hs_col).size().reset_index(name="Số dòng")
-        st.dataframe(grouped, use_container_width=True, hide_index=True)
+    with st.expander("🎯 Mã HS có độ chính xác cao nhất so với tìm kiếm"):
+        hs_accuracy = (
+            top_result.groupby(hs_col)["Điểm giống"]
+            .max()
+            .reset_index()
+            .rename(columns={"Điểm giống": "Độ chính xác cao nhất"})
+            .sort_values("Độ chính xác cao nhất", ascending=False)
+        )
+        hs_accuracy["Độ chính xác cao nhất"] = hs_accuracy["Độ chính xác cao nhất"].apply(lambda x: f"{x:.1f}%")
+        st.dataframe(hs_accuracy, use_container_width=True, hide_index=True)
 
     st.subheader(f"Tìm thấy {len(top_result)} kết quả phù hợp nhất")
 
@@ -433,28 +440,28 @@ if os.path.exists(DATA_FILE):
                 f"Tổng {len(sheet_names)} sheet"
             )
 
-            # Bảng gọn như cũ
-            display_cols = [c for c in view_df.columns if c != "Sheet"]
-            table_df = view_df[display_cols].reset_index(drop=True)
-            table_df.index = table_df.index + 1
-            st.dataframe(table_df, use_container_width=True, hide_index=False)
-
-            # Mở thẻ: nhập số dòng → bấm nút
-            st.markdown("---")
-            c1, c2 = st.columns([2, 1])
-            with c1:
+            # Nhập dòng + nút mở thẻ — đặt ngay trên bảng cho gọn
+            ca, cb, cc = st.columns([1, 1, 4])
+            with ca:
                 row_num = st.number_input(
-                    "Nhập số thứ tự dòng muốn xem thẻ",
+                    "Dòng",
                     min_value=1, max_value=len(view_df), step=1,
                     key=f"row_input_{selected_sheet}",
+                    label_visibility="visible",
                 )
-            with c2:
+            with cb:
                 st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
-                if st.button("🃏 Mở thẻ chi tiết", key=f"open_card_{selected_sheet}", type="primary"):
+                if st.button("🃏 Mở thẻ", key=f"open_card_{selected_sheet}", type="primary"):
                     st.session_state["sheet_detail_row"]   = int(row_num) - 1
                     st.session_state["sheet_detail_sheet"] = selected_sheet
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
+
+            # Bảng gọn bên dưới
+            display_cols = [c for c in view_df.columns if c != "Sheet"]
+            table_df = view_df[display_cols].reset_index(drop=True)
+            table_df.index = table_df.index + 1
+            st.dataframe(table_df, use_container_width=True, hide_index=False)
 
 else:
     st.info("Hãy upload file Excel để bắt đầu.")
