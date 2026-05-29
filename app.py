@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import re, json, html, hashlib, unicodedata
+import re, json, html, hashlib, unicodedata, shutil
 from pathlib import Path
 from difflib import SequenceMatcher
 
@@ -11,6 +11,8 @@ USERDATA_DIR = BASE_DIR / "userdata"
 USERDATA_DIR.mkdir(exist_ok=True)
 
 USERS_FILE = BASE_DIR / "users.json"
+SETTINGS_FILE = BASE_DIR / "settings.json"
+
 ADMIN_USER = "admin"
 ADMIN_PASS_DEFAULT = "000"
 
@@ -25,7 +27,7 @@ mark { background:#ffe066; color:black; padding:2px 4px; border-radius:4px; }
 """, unsafe_allow_html=True)
 
 
-# ================= USER =================
+# ================= USER / SETTINGS =================
 def hash_pw(pw):
     return hashlib.sha256(str(pw).encode("utf-8")).hexdigest()
 
@@ -61,6 +63,21 @@ def load_users():
     return users
 
 
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def load_settings():
+    if SETTINGS_FILE.exists():
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    settings = {"allow_register": True}
+    save_settings(settings)
+    return settings
+
+
 def user_dir(username):
     d = USERDATA_DIR / username
     d.mkdir(parents=True, exist_ok=True)
@@ -73,6 +90,23 @@ def data_file(username):
 
 def history_file(username):
     return user_dir(username) / "history.csv"
+
+
+def delete_user_completely(username):
+    if username == ADMIN_USER:
+        return False
+
+    users = load_users()
+
+    if username in users:
+        del users[username]
+        save_users(users)
+
+    folder = USERDATA_DIR / username
+    if folder.exists():
+        shutil.rmtree(folder)
+
+    return True
 
 
 # ================= TEXT =================
@@ -276,6 +310,8 @@ def delete_history(username, keyword):
 def show_login():
     st.title("🔐 Đăng nhập")
     users = load_users()
+    settings = load_settings()
+    allow_register = settings.get("allow_register", True)
 
     tab_login, tab_register = st.tabs(["Đăng nhập", "Đăng ký"])
 
@@ -299,30 +335,33 @@ def show_login():
                 st.error("Sai tài khoản hoặc mật khẩu.")
 
     with tab_register:
-        new_user = st.text_input("Tên đăng nhập mới", key="reg_user")
-        new_pass = st.text_input("Mật khẩu", type="password", key="reg_pass")
-        new_pass2 = st.text_input("Nhập lại mật khẩu", type="password", key="reg_pass2")
+        if not allow_register:
+            st.warning("Đăng ký tài khoản đang tạm khóa. Liên hệ admin để được tạo tài khoản.")
+        else:
+            new_user = st.text_input("Tên đăng nhập mới", key="reg_user")
+            new_pass = st.text_input("Mật khẩu", type="password", key="reg_pass")
+            new_pass2 = st.text_input("Nhập lại mật khẩu", type="password", key="reg_pass2")
 
-        if st.button("Tạo tài khoản", use_container_width=True):
-            new_user = clean_username(new_user)
+            if st.button("Tạo tài khoản", use_container_width=True):
+                new_user = clean_username(new_user)
 
-            if not new_user or not new_pass:
-                st.error("Nhập thiếu.")
-            elif new_user == ADMIN_USER:
-                st.error("Tên đăng nhập không hợp lệ.")
-            elif new_user in users:
-                st.error("Tài khoản đã tồn tại.")
-            elif new_pass != new_pass2:
-                st.error("Mật khẩu không khớp.")
-            else:
-                users[new_user] = {
-                    "password": hash_pw(new_pass),
-                    "plain_password": new_pass,
-                    "role": "user"
-                }
-                save_users(users)
-                user_dir(new_user)
-                st.success("Tạo tài khoản thành công. Hãy đăng nhập.")
+                if not new_user or not new_pass:
+                    st.error("Nhập thiếu.")
+                elif new_user == ADMIN_USER:
+                    st.error("Tên đăng nhập không hợp lệ.")
+                elif new_user in users:
+                    st.error("Tài khoản đã tồn tại.")
+                elif new_pass != new_pass2:
+                    st.error("Mật khẩu không khớp.")
+                else:
+                    users[new_user] = {
+                        "password": hash_pw(new_pass),
+                        "plain_password": new_pass,
+                        "role": "user"
+                    }
+                    save_users(users)
+                    user_dir(new_user)
+                    st.success("Tạo tài khoản thành công. Hãy đăng nhập.")
 
 
 # ================= ADMIN =================
@@ -330,7 +369,7 @@ def show_admin_panel():
     st.title("👑 Admin Panel")
     users = load_users()
 
-    tab_users, tab_files = st.tabs(["👤 Tài khoản", "📁 Dữ liệu user"])
+    tab_users, tab_files, tab_settings = st.tabs(["👤 Tài khoản", "📁 Dữ liệu user", "⚙️ Cài đặt"])
 
     with tab_users:
         st.subheader("Quản lý tài khoản")
@@ -340,11 +379,13 @@ def show_admin_panel():
 
             c1.write(f"**{uname}**")
             c2.write(info["role"])
-            c3.code(info.get("plain_password", "Không có MK rõ"))
 
             if uname == ADMIN_USER:
-                c4.info("Admin mặc định: 000")
+                c3.success("🔒 Tài khoản hệ thống")
+                c4.info("Không thể đổi mật khẩu admin")
             else:
+                c3.code(info.get("plain_password", "Không có MK rõ"))
+
                 new_pw = c4.text_input(
                     "MK mới",
                     type="password",
@@ -363,12 +404,27 @@ def show_admin_panel():
                         st.success(f"Đã reset mật khẩu cho {uname}")
                         st.rerun()
 
-            if uname != ADMIN_USER:
-                if c5.button("Xóa", key=f"delete_user_{uname}"):
-                    del users[uname]
-                    save_users(users)
-                    st.success(f"Đã xóa {uname}")
-                    st.rerun()
+                confirm_key = f"confirm_delete_{uname}"
+
+                if c5.button("🗑", key=f"delete_user_{uname}"):
+                    st.session_state[confirm_key] = True
+
+                if st.session_state.get(confirm_key):
+                    st.warning(
+                        f"Bạn chắc chắn muốn xóa tài khoản **{uname}** chứ?\n\n"
+                        "Toàn bộ file dữ liệu, lịch sử tìm kiếm và thông tin tài khoản sẽ mất vĩnh viễn."
+                    )
+
+                    col_yes, col_no = st.columns(2)
+
+                    if col_yes.button("✅ Xác nhận xóa", key=f"yes_delete_{uname}"):
+                        delete_user_completely(uname)
+                        st.success(f"Đã xóa {uname}")
+                        st.rerun()
+
+                    if col_no.button("❌ Hủy", key=f"no_delete_{uname}"):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
 
     with tab_files:
         st.subheader("Xem / tải / upload dữ liệu từng user")
@@ -377,43 +433,63 @@ def show_admin_panel():
 
         if not user_list:
             st.warning("Chưa có tài khoản user nào.")
-            return
-
-        target_user = st.selectbox("Chọn user", user_list)
-        path = data_file(target_user)
-
-        if path.exists():
-            st.success("User này đã có file dữ liệu.")
-
-            with open(path, "rb") as f:
-                st.download_button(
-                    "⬇️ Tải file Excel của user này",
-                    data=f,
-                    file_name=f"{target_user}_data.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-            try:
-                df, sheets = load_excel_all(str(path))
-                st.write(f"Đọc được **{len(df)} dòng** / **{len(sheets)} sheet**")
-                st.dataframe(df.head(100), use_container_width=True)
-            except Exception as e:
-                st.error(f"Lỗi đọc file: {e}")
-
-            if st.button("🗑 Xóa file dữ liệu user này"):
-                path.unlink()
-                st.cache_data.clear()
-                st.rerun()
         else:
-            st.warning("User này chưa có file dữ liệu.")
+            target_user = st.selectbox("Chọn user", user_list)
+            path = data_file(target_user)
 
-        uploaded = st.file_uploader(f"Upload Excel cho {target_user}", type=["xlsx"], key=f"admin_upload_{target_user}")
+            if path.exists():
+                st.success("User này đã có file dữ liệu.")
 
-        if uploaded:
-            with open(path, "wb") as f:
-                f.write(uploaded.getbuffer())
-            st.cache_data.clear()
-            st.success("Đã upload file.")
+                with open(path, "rb") as f:
+                    st.download_button(
+                        "⬇️ Tải file Excel của user này",
+                        data=f,
+                        file_name=f"{target_user}_data.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+                try:
+                    df, sheets = load_excel_all(str(path))
+                    st.write(f"Đọc được **{len(df)} dòng** / **{len(sheets)} sheet**")
+                    st.dataframe(df.head(100), use_container_width=True)
+                except Exception as e:
+                    st.error(f"Lỗi đọc file: {e}")
+
+                if st.button("🗑 Xóa file dữ liệu user này"):
+                    path.unlink()
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.warning("User này chưa có file dữ liệu.")
+
+            uploaded = st.file_uploader(
+                f"Upload Excel cho {target_user}",
+                type=["xlsx"],
+                key=f"admin_upload_{target_user}"
+            )
+
+            if uploaded:
+                with open(path, "wb") as f:
+                    f.write(uploaded.getbuffer())
+                st.cache_data.clear()
+                st.success("Đã upload file.")
+                st.rerun()
+
+    with tab_settings:
+        st.subheader("Cài đặt hệ thống")
+
+        settings = load_settings()
+        allow_register = settings.get("allow_register", True)
+
+        new_allow = st.toggle(
+            "Cho phép người dùng tự đăng ký tài khoản",
+            value=allow_register
+        )
+
+        if new_allow != allow_register:
+            settings["allow_register"] = new_allow
+            save_settings(settings)
+            st.success("Đã cập nhật cài đặt đăng ký.")
             st.rerun()
 
 
@@ -692,6 +768,26 @@ def show_main_app():
                         users[username]["plain_password"] = new_pw
                         save_users(users)
                         st.success("Đã đổi mật khẩu.")
+
+            with st.expander("⚠️ Xóa tài khoản"):
+                st.warning("Xóa tài khoản sẽ xóa toàn bộ file Excel và lịch sử tìm kiếm của bạn.")
+
+                if st.button("🗑 Xóa tài khoản của tôi", key=f"self_delete_{username}"):
+                    st.session_state[f"confirm_self_delete_{username}"] = True
+
+                if st.session_state.get(f"confirm_self_delete_{username}"):
+                    st.error("Bạn chắc chắn muốn xóa tài khoản này chứ? Dữ liệu sẽ mất vĩnh viễn.")
+
+                    c1, c2 = st.columns(2)
+
+                    if c1.button("✅ Xác nhận xóa", key=f"yes_self_delete_{username}"):
+                        delete_user_completely(username)
+                        st.session_state.clear()
+                        st.rerun()
+
+                    if c2.button("❌ Hủy", key=f"no_self_delete_{username}"):
+                        st.session_state[f"confirm_self_delete_{username}"] = False
+                        st.rerun()
 
         st.markdown("---")
 
