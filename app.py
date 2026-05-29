@@ -235,21 +235,20 @@ def show_results(top_result, search_text, search_df, name_col, hs_col):
                 st.rerun()
 
     with st.expander("🎯 Xếp hạng mã HS theo mức phù hợp với tìm kiếm"):
-        hs_accuracy = (
-            top_result.groupby(hs_col)["Điểm giống"]
-            .agg(["mean", "count", "max"])
-            .reset_index()
-            .rename(columns={
-                hs_col: "Mã HS",
-                "mean": "Điểm TB (%)",
-                "count": "Số kết quả",
-                "max": "Điểm cao nhất (%)",
-            })
-            .sort_values("Điểm TB (%)", ascending=False)
+        hs_grp = top_result.groupby(hs_col)["Điểm giống"].agg(["mean", "count", "max"])
+        hs_grp.columns = ["Điểm TB", "Số kết quả", "Điểm cao nhất"]
+        hs_grp = hs_grp.reset_index()
+        # Điểm xếp hạng = TB * 0.7 + (tần suất chuẩn hóa) * 0.3
+        max_count = hs_grp["Số kết quả"].max() or 1
+        hs_grp["Điểm xếp hạng"] = (
+            hs_grp["Điểm TB"] * 0.7
+            + (hs_grp["Số kết quả"] / max_count * 100) * 0.3
         )
-        hs_accuracy["Điểm TB (%)"] = hs_accuracy["Điểm TB (%)"].apply(lambda x: f"{x:.1f}")
-        hs_accuracy["Điểm cao nhất (%)"] = hs_accuracy["Điểm cao nhất (%)"].apply(lambda x: f"{x:.1f}")
-        st.dataframe(hs_accuracy, use_container_width=True, hide_index=True)
+        hs_grp = hs_grp.sort_values("Điểm xếp hạng", ascending=False).drop(columns=["Điểm xếp hạng"])
+        hs_grp["Điểm TB"] = hs_grp["Điểm TB"].apply(lambda x: f"{x:.1f}%")
+        hs_grp["Điểm cao nhất"] = hs_grp["Điểm cao nhất"].apply(lambda x: f"{x:.1f}%")
+        hs_grp = hs_grp.rename(columns={hs_col: "Mã HS"})
+        st.dataframe(hs_grp, use_container_width=True, hide_index=True)
 
     st.subheader(f"Tìm thấy {len(top_result)} kết quả phù hợp nhất")
 
