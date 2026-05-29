@@ -285,6 +285,7 @@ def show_login():
             ok_plain = username in users and users[username].get("plain_password") == password
 
             if ok_hash or ok_plain:
+                st.session_state.clear()
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
                 st.session_state["role"] = users[username]["role"]
@@ -407,6 +408,8 @@ def show_search_page(username):
     st.title("🔎 Tra cứu mã HS")
     path = data_file(username)
 
+    search_key = f"search_text_{username}"
+
     if not path.exists():
         st.info("Chưa có file dữ liệu. Upload Excel ở sidebar trước.")
         return
@@ -438,12 +441,12 @@ def show_search_page(username):
 
     st.caption(f"Cột tên hàng: **{name_col}** | Cột mã HS: **{hs_col}**")
 
-    if "search_text" not in st.session_state:
-        st.session_state["search_text"] = ""
+    if search_key not in st.session_state:
+        st.session_state[search_key] = ""
 
     query = st.text_input(
         "Nhập tên hàng cần tra",
-        key="search_text",
+        key=search_key,
         placeholder="Ví dụ: phớt sắt, xy lanh, hydraulic cylinder..."
     )
 
@@ -497,7 +500,7 @@ def show_search_page(username):
             hist = pd.read_csv(hpath)
 
             with st.expander("🕘 Lịch sử tìm kiếm", expanded=True):
-                if st.button("🧹 Xóa toàn bộ lịch sử"):
+                if st.button("🧹 Xóa toàn bộ lịch sử", key=f"clear_history_{username}"):
                     clear_history(username)
                     st.rerun()
 
@@ -506,11 +509,11 @@ def show_search_page(username):
                     c1, c2, c3 = st.columns([5, 1, 1])
                     c1.write(kw)
 
-                    if c2.button("🔍", key=f"hist_search_{i}_{kw}"):
-                        st.session_state["search_text"] = kw
+                    if c2.button("🔍", key=f"hist_search_{username}_{i}_{kw}"):
+                        st.session_state[search_key] = kw
                         st.rerun()
 
-                    if c3.button("🗑", key=f"hist_delete_{i}_{kw}"):
+                    if c3.button("🗑", key=f"hist_delete_{username}_{i}_{kw}"):
                         delete_history(username, kw)
                         st.rerun()
 
@@ -534,7 +537,7 @@ def show_sheet_page(username):
         st.error("File không có sheet.")
         return
 
-    selected_sheet = st.selectbox("Chọn sheet", sheets)
+    selected_sheet = st.selectbox("Chọn sheet", sheets, key=f"sheet_select_{username}")
 
     try:
         df = load_one_sheet(str(path), selected_sheet)
@@ -552,7 +555,7 @@ def show_sheet_page(username):
 
     st.caption(f"Sheet **{selected_sheet}** — {len(df)} dòng")
 
-    detail_key = f"opened_row_{selected_sheet}"
+    detail_key = f"opened_row_{username}_{selected_sheet}"
 
     if detail_key not in st.session_state:
         st.session_state[detail_key] = None
@@ -562,10 +565,11 @@ def show_sheet_page(username):
         min_value=1,
         max_value=len(df),
         value=1,
-        step=1
+        step=1,
+        key=f"row_num_{username}_{selected_sheet}"
     )
 
-    if st.button("🃏 Mở thẻ dòng này"):
+    if st.button("🃏 Mở thẻ dòng này", key=f"open_card_{username}_{selected_sheet}"):
         st.session_state[detail_key] = int(row_num) - 1
         st.rerun()
 
@@ -581,17 +585,17 @@ def show_sheet_page(username):
 
         c1, c2, c3 = st.columns([1, 1, 4])
 
-        if c1.button("❌ Đóng thẻ"):
+        if c1.button("❌ Đóng thẻ", key=f"close_card_{username}_{selected_sheet}"):
             st.session_state[detail_key] = None
             st.rerun()
 
         if idx > 0:
-            if c2.button("⬅ Dòng trước"):
+            if c2.button("⬅ Dòng trước", key=f"prev_row_{username}_{selected_sheet}"):
                 st.session_state[detail_key] = idx - 1
                 st.rerun()
 
         if idx < len(df) - 1:
-            if c3.button("Dòng tiếp ➡"):
+            if c3.button("Dòng tiếp ➡", key=f"next_row_{username}_{selected_sheet}"):
                 st.session_state[detail_key] = idx + 1
                 st.rerun()
 
@@ -630,7 +634,7 @@ def show_main_app():
         else:
             st.warning("Chưa có file dữ liệu")
 
-        uploaded = st.file_uploader("Upload file Excel", type=["xlsx"])
+        uploaded = st.file_uploader("Upload file Excel", type=["xlsx"], key=f"upload_{username}")
 
         if uploaded:
             with open(path, "wb") as f:
@@ -645,17 +649,18 @@ def show_main_app():
                     "⬇️ Tải file hiện tại",
                     data=f,
                     file_name=f"{username}_data.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_{username}"
                 )
 
         st.markdown("---")
 
         with st.expander("🔑 Đổi mật khẩu"):
-            old_pw = st.text_input("Mật khẩu cũ", type="password")
-            new_pw = st.text_input("Mật khẩu mới", type="password")
-            new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password")
+            old_pw = st.text_input("Mật khẩu cũ", type="password", key=f"old_pw_{username}")
+            new_pw = st.text_input("Mật khẩu mới", type="password", key=f"new_pw_{username}")
+            new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password", key=f"new_pw2_{username}")
 
-            if st.button("Lưu mật khẩu"):
+            if st.button("Lưu mật khẩu", key=f"save_pw_{username}"):
                 users = load_users()
 
                 ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
@@ -672,8 +677,9 @@ def show_main_app():
                     save_users(users)
                     st.success("Đã đổi mật khẩu.")
 
-        if st.button("🚪 Đăng xuất", use_container_width=True):
-            st.session_state.clear()
+        if st.button("🚪 Đăng xuất", use_container_width=True, key=f"logout_{username}"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
 
     if role == "admin":
