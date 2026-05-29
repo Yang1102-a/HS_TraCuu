@@ -36,6 +36,11 @@ def clean_username(username):
 
 
 def save_users(users):
+    users[ADMIN_USER] = {
+        "password": hash_pw(ADMIN_PASS_DEFAULT),
+        "plain_password": ADMIN_PASS_DEFAULT,
+        "role": "admin"
+    }
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
 
@@ -43,14 +48,14 @@ def save_users(users):
 def load_users():
     if USERS_FILE.exists():
         with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            users = json.load(f)
+    else:
+        users = {}
 
-    users = {
-        ADMIN_USER: {
-            "password": hash_pw(ADMIN_PASS_DEFAULT),
-            "plain_password": ADMIN_PASS_DEFAULT,
-            "role": "admin"
-        }
+    users[ADMIN_USER] = {
+        "password": hash_pw(ADMIN_PASS_DEFAULT),
+        "plain_password": ADMIN_PASS_DEFAULT,
+        "role": "admin"
     }
     save_users(users)
     return users
@@ -337,23 +342,26 @@ def show_admin_panel():
             c2.write(info["role"])
             c3.code(info.get("plain_password", "Không có MK rõ"))
 
-            new_pw = c4.text_input(
-                "MK mới",
-                type="password",
-                key=f"reset_pw_{uname}",
-                placeholder="Nhập MK mới",
-                label_visibility="collapsed"
-            )
+            if uname == ADMIN_USER:
+                c4.info("Admin mặc định: 000")
+            else:
+                new_pw = c4.text_input(
+                    "MK mới",
+                    type="password",
+                    key=f"reset_pw_{uname}",
+                    placeholder="Nhập MK mới",
+                    label_visibility="collapsed"
+                )
 
-            if c4.button("Reset MK", key=f"reset_btn_{uname}"):
-                if not new_pw:
-                    st.warning("Nhập mật khẩu mới trước.")
-                else:
-                    users[uname]["password"] = hash_pw(new_pw)
-                    users[uname]["plain_password"] = new_pw
-                    save_users(users)
-                    st.success(f"Đã reset mật khẩu cho {uname}")
-                    st.rerun()
+                if c4.button("Reset MK", key=f"reset_btn_{uname}"):
+                    if not new_pw:
+                        st.warning("Nhập mật khẩu mới trước.")
+                    else:
+                        users[uname]["password"] = hash_pw(new_pw)
+                        users[uname]["plain_password"] = new_pw
+                        save_users(users)
+                        st.success(f"Đã reset mật khẩu cho {uname}")
+                        st.rerun()
 
             if uname != ADMIN_USER:
                 if c5.button("Xóa", key=f"delete_user_{uname}"):
@@ -365,7 +373,13 @@ def show_admin_panel():
     with tab_files:
         st.subheader("Xem / tải / upload dữ liệu từng user")
 
-        target_user = st.selectbox("Chọn user", list(users.keys()))
+        user_list = [u for u in users.keys() if u != ADMIN_USER]
+
+        if not user_list:
+            st.warning("Chưa có tài khoản user nào.")
+            return
+
+        target_user = st.selectbox("Chọn user", user_list)
         path = data_file(target_user)
 
         if path.exists():
@@ -623,59 +637,63 @@ def show_main_app():
 
     with st.sidebar:
         st.markdown(f"### 👤 {username}")
+
         if role == "admin":
             st.markdown("👑 Admin")
-
-        st.markdown("---")
-        st.markdown("### 📁 File dữ liệu")
-
-        if path.exists():
-            st.success("✅ Đã có file dữ liệu")
+            st.info("Admin chỉ dùng để quản trị.")
         else:
-            st.warning("Chưa có file dữ liệu")
+            st.markdown("---")
+            st.markdown("### 📁 File dữ liệu")
 
-        uploaded = st.file_uploader("Upload file Excel", type=["xlsx"], key=f"upload_{username}")
+            if path.exists():
+                st.success("✅ Đã có file dữ liệu")
+            else:
+                st.warning("Chưa có file dữ liệu")
 
-        if uploaded:
-            with open(path, "wb") as f:
-                f.write(uploaded.getbuffer())
-            st.cache_data.clear()
-            st.success("Đã lưu file Excel.")
-            st.rerun()
+            uploaded = st.file_uploader("Upload file Excel", type=["xlsx"], key=f"upload_{username}")
 
-        if path.exists():
-            with open(path, "rb") as f:
-                st.download_button(
-                    "⬇️ Tải file hiện tại",
-                    data=f,
-                    file_name=f"{username}_data.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_{username}"
-                )
+            if uploaded:
+                with open(path, "wb") as f:
+                    f.write(uploaded.getbuffer())
+                st.cache_data.clear()
+                st.success("Đã lưu file Excel.")
+                st.rerun()
+
+            if path.exists():
+                with open(path, "rb") as f:
+                    st.download_button(
+                        "⬇️ Tải file hiện tại",
+                        data=f,
+                        file_name=f"{username}_data.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_{username}"
+                    )
+
+            st.markdown("---")
+
+            with st.expander("🔑 Đổi mật khẩu"):
+                old_pw = st.text_input("Mật khẩu cũ", type="password", key=f"old_pw_{username}")
+                new_pw = st.text_input("Mật khẩu mới", type="password", key=f"new_pw_{username}")
+                new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password", key=f"new_pw2_{username}")
+
+                if st.button("Lưu mật khẩu", key=f"save_pw_{username}"):
+                    users = load_users()
+
+                    ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
+
+                    if not ok_old:
+                        st.error("Mật khẩu cũ sai.")
+                    elif not new_pw:
+                        st.error("Mật khẩu mới không được trống.")
+                    elif new_pw != new_pw2:
+                        st.error("Mật khẩu mới không khớp.")
+                    else:
+                        users[username]["password"] = hash_pw(new_pw)
+                        users[username]["plain_password"] = new_pw
+                        save_users(users)
+                        st.success("Đã đổi mật khẩu.")
 
         st.markdown("---")
-
-        with st.expander("🔑 Đổi mật khẩu"):
-            old_pw = st.text_input("Mật khẩu cũ", type="password", key=f"old_pw_{username}")
-            new_pw = st.text_input("Mật khẩu mới", type="password", key=f"new_pw_{username}")
-            new_pw2 = st.text_input("Nhập lại mật khẩu mới", type="password", key=f"new_pw2_{username}")
-
-            if st.button("Lưu mật khẩu", key=f"save_pw_{username}"):
-                users = load_users()
-
-                ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
-
-                if not ok_old:
-                    st.error("Mật khẩu cũ sai.")
-                elif not new_pw:
-                    st.error("Mật khẩu mới không được trống.")
-                elif new_pw != new_pw2:
-                    st.error("Mật khẩu mới không khớp.")
-                else:
-                    users[username]["password"] = hash_pw(new_pw)
-                    users[username]["plain_password"] = new_pw
-                    save_users(users)
-                    st.success("Đã đổi mật khẩu.")
 
         if st.button("🚪 Đăng xuất", use_container_width=True, key=f"logout_{username}"):
             for key in list(st.session_state.keys()):
@@ -683,16 +701,7 @@ def show_main_app():
             st.rerun()
 
     if role == "admin":
-        tab_search, tab_sheet, tab_admin = st.tabs(["🔎 Tra cứu", "📋 Xem sheet", "👑 Admin Panel"])
-
-        with tab_search:
-            show_search_page(username)
-
-        with tab_sheet:
-            show_sheet_page(username)
-
-        with tab_admin:
-            show_admin_panel()
+        show_admin_panel()
     else:
         tab_search, tab_sheet = st.tabs(["🔎 Tra cứu", "📋 Xem sheet"])
 
