@@ -234,15 +234,21 @@ def show_results(top_result, search_text, search_df, name_col, hs_col):
                 st.session_state["hs_filter"] = r["Mã HS"]
                 st.rerun()
 
-    with st.expander("🎯 Mã HS có độ chính xác cao nhất so với tìm kiếm"):
+    with st.expander("🎯 Xếp hạng mã HS theo mức phù hợp với tìm kiếm"):
         hs_accuracy = (
             top_result.groupby(hs_col)["Điểm giống"]
-            .max()
+            .agg(["mean", "count", "max"])
             .reset_index()
-            .rename(columns={"Điểm giống": "Độ chính xác cao nhất"})
-            .sort_values("Độ chính xác cao nhất", ascending=False)
+            .rename(columns={
+                hs_col: "Mã HS",
+                "mean": "Điểm TB (%)",
+                "count": "Số kết quả",
+                "max": "Điểm cao nhất (%)",
+            })
+            .sort_values("Điểm TB (%)", ascending=False)
         )
-        hs_accuracy["Độ chính xác cao nhất"] = hs_accuracy["Độ chính xác cao nhất"].apply(lambda x: f"{x:.1f}%")
+        hs_accuracy["Điểm TB (%)"] = hs_accuracy["Điểm TB (%)"].apply(lambda x: f"{x:.1f}")
+        hs_accuracy["Điểm cao nhất (%)"] = hs_accuracy["Điểm cao nhất (%)"].apply(lambda x: f"{x:.1f}")
         st.dataframe(hs_accuracy, use_container_width=True, hide_index=True)
 
     st.subheader(f"Tìm thấy {len(top_result)} kết quả phù hợp nhất")
@@ -461,6 +467,7 @@ if os.path.exists(DATA_FILE):
             display_cols = [c for c in view_df.columns if c != "Sheet"]
             table_df = view_df[display_cols].reset_index(drop=True)
             table_df.index = table_df.index + 1
+            table_df.index.name = "DÒNG"
             st.dataframe(table_df, use_container_width=True, hide_index=False)
 
 else:
