@@ -207,29 +207,118 @@ def find_hs_col(columns):
     return None
 
 
+
+def token_match_positions(query_tokens, text_tokens):
+    """
+    Tìm vị trí các từ query trong text.
+    Ưu tiên khớp chính xác, sau đó mới khớp chứa nhau.
+    """
+    positions = []
+    used_positions = set()
+
+    for q in query_tokens:
+        found = None
+
+        # Ưu tiên khớp đúng token
+        for i, t in enumerate(text_tokens):
+            if i in used_positions:
+                continue
+            if q == t:
+                found = i
+                break
+
+        # Nếu không có, mới cho phép q nằm trong token hoặc token nằm trong q
+        if found is None:
+            for i, t in enumerate(text_tokens):
+                if i in used_positions:
+                    continue
+                if q in t or t in q:
+                    found = i
+                    break
+
+        if found is not None:
+            positions.append(found)
+            used_positions.add(found)
+
+    return positions
+
+
+def ordered_subsequence_count(query_tokens, text_tokens):
+    """
+    Đếm số từ query xuất hiện theo đúng thứ tự trong text.
+    """
+    qi = 0
+    count = 0
+
+    for t in text_tokens:
+        if qi >= len(query_tokens):
+            break
+
+        q = query_tokens[qi]
+
+        if q == t or q in t or t in q:
+            count += 1
+            qi += 1
+
+    return count
+
+
 def similarity_score(query, text):
+    """
+    Điểm tìm kiếm theo đúng logic nghiệp vụ:
+
+    1. Đủ toàn bộ từ khóa + đúng cụm liên tiếp => 100
+       Ví dụ: query "con chó mực"
+       text "abc con chó mực màu vàng chanh xyz" => 100
+
+    2. Đủ toàn bộ từ khóa + đúng thứ tự nhưng có từ chen giữa => 90-99
+
+    3. Đủ toàn bộ từ khóa nhưng sai thứ tự => 75-85
+
+    4. Thiếu từ => không được điểm cao, tối đa 70
+    """
     q = normalize_text(query)
     t = normalize_text(text)
 
     if not q or not t:
         return 0
-    if q == t:
-        return 100
-    if q in t:
-        return 96
 
     q_tokens = q.split()
     t_tokens = t.split()
 
-    matched = 0
-    for qt in q_tokens:
-        if any(qt == tt or qt in tt or tt in qt for tt in t_tokens):
-            matched += 1
+    if not q_tokens or not t_tokens:
+        return 0
 
-    token_score = matched / len(q_tokens) * 90 if q_tokens else 0
-    seq_score = SequenceMatcher(None, q, t).ratio() * 100
+    phrase = " ".join(q_tokens)
 
-    return round(max(token_score, seq_score), 2)
+    # Đúng nguyên cụm, không trừ vì câu dài
+    if phrase in t:
+        return 100
+
+    positions = token_match_positions(q_tokens, t_tokens)
+    matched = len(positions)
+    coverage = matched / len(q_tokens)
+
+    # Thiếu từ thì điểm thấp, không cho leo lên đầu
+    if coverage < 1:
+        return round(coverage * 70, 2)
+
+    # Đủ từ rồi mới xét thứ tự
+    ordered_count = ordered_subsequence_count(q_tokens, t_tokens)
+    ordered_ratio = ordered_count / len(q_tokens)
+
+    # Đủ từ + đúng thứ tự
+    if ordered_ratio == 1:
+        gaps = sum(
+            max(0, b - a - 1)
+            for a, b in zip(positions, positions[1:])
+        )
+
+        # Có từ chen giữa thì trừ nhẹ, nhưng vẫn cao hơn sai thứ tự
+        return round(max(90, 99 - gaps), 2)
+
+    # Đủ từ nhưng sai thứ tự
+    return round(75 + ordered_ratio * 10, 2)
 
 
 def highlight_text(original, query):
@@ -597,6 +686,14 @@ def show_search_page(username):
     if search_key not in st.session_state:
         st.session_state[search_key] = ""
 
+    pending_key = f"pending_search_text_{username}"
+
+    # Streamlit không cho sửa st.session_state[search_key]
+    # sau khi text_input đã render. Vì vậy click lịch sử sẽ ghi vào pending_key,
+    # rồi trước khi tạo text_input mới chuyển pending_key sang search_key.
+    if pending_key in st.session_state:
+        st.session_state[search_key] = st.session_state.pop(pending_key)
+
     query = st.text_input(
         "Nhập tên hàng cần tra",
         key=search_key,
@@ -664,7 +761,7 @@ def show_search_page(username):
                         c1.write(kw)
 
                         if c2.button("🔍", key=f"hist_search_{username}_{i}_{kw}"):
-                            st.session_state[search_key] = kw
+                            st.session_state[f"pending_search_text_{username}"] = kw
                             st.rerun()
 
                         if c3.button("🗑", key=f"hist_delete_{username}_{i}_{kw}"):
