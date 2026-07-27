@@ -1,20 +1,18 @@
 import streamlit as st
 import pandas as pd
-import re, json, html, hashlib, unicodedata, shutil
-from pathlib import Path
-from difflib import SequenceMatcher
+import re, json, html, unicodedata
+import bcrypt
+from io import BytesIO
+from supabase import create_client
 
 st.set_page_config(page_title="Tra cứu mã HS", layout="wide")
 
-BASE_DIR = Path(__file__).parent
-USERDATA_DIR = BASE_DIR / "userdata"
-USERDATA_DIR.mkdir(exist_ok=True)
-
-USERS_FILE = BASE_DIR / "users.json"
-SETTINGS_FILE = BASE_DIR / "settings.json"
-
 ADMIN_USER = "admin"
 ADMIN_PASS_DEFAULT = "000"
+
+BUCKET_NAME = "userdata"
+SETTINGS_ROW_ID = 1
+HISTORY_LIMIT = 30
 
 st.markdown("""
 <style>
@@ -27,9 +25,36 @@ mark { background:#ffe066; color:black; padding:2px 4px; border-radius:4px; }
 """, unsafe_allow_html=True)
 
 
+# ================= SUPABASE CLIENT =================
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_KEY"]
+except Exception:
+    st.error(
+        "Thiếu cấu hình SUPABASE_URL / SUPABASE_SERVICE_KEY trong Secrets.\n\n"
+        "Vào Streamlit Cloud > Settings > Secrets và thêm 2 giá trị này."
+    )
+    st.stop()
+
+
+@st.cache_resource
+def get_supabase_client():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+supabase = get_supabase_client()
+
+
 # ================= USER / SETTINGS =================
 def hash_pw(pw):
-    return hashlib.sha256(str(pw).encode("utf-8")).hexdigest()
+    return bcrypt.hashpw(str(pw).encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_pw(pw, hashed):
+    try:
+        return bcrypt.checkpw(str(pw).encode("utf-8"), str(hashed).encode("utf-8"))
+    except Exception:
+        return False
 
 
 def clean_username(username):
@@ -37,44 +62,64 @@ def clean_username(username):
     return re.sub(r"[^a-zA-Z0-9_-]", "", username)
 
 
-def default_admin():
+def default_admin_record():
     return {
+        "username": ADMIN_USER,
         "password": hash_pw(ADMIN_PASS_DEFAULT),
-        "plain_password": ADMIN_PASS_DEFAULT,
         "role": "admin",
-        "locked": False
+        "locked": False,
     }
 
 
-def normalize_user_data(users):
-    users[ADMIN_USER] = default_admin()
+def ensure_admin_exists():
+    # chỉ tạo admin mặc định nếu CHƯA tồn tại, không ghi đè admin đã có
+    resp = supabase.table("users").select("username").eq("username", ADMIN_USER).execute()
+    if not resp.data:
+        supabase.table("users").insert(default_admin_record()).execute()
 
-    for uname, info in users.items():
-        if uname == ADMIN_USER:
-            continue
-        info.setdefault("role", "user")
-        info.setdefault("locked", False)
-        info.setdefault("plain_password", "")
+
+def get_user_by_username(username):
+    # truy vấn đúng 1 user, dùng cho đăng nhập thay vì tải cả bảng
+    resp = supabase.table("users").select("*").eq("username", username).execute()
+    if not resp.data:
+        return None
+
+    row = resp.data[0]
+    return {
+        "password": row.get("password", ""),
+        "role": row.get("role", "user"),
+        "locked": row.get("locked", False),
+    }
+
+
+def load_users():
+    ensure_admin_exists()
+
+    resp = supabase.table("users").select("*").execute()
+    users = {}
+
+    for row in resp.data:
+        uname = row["username"]
+        users[uname] = {
+            "password": row.get("password", ""),
+            "role": row.get("role", "user"),
+            "locked": row.get("locked", False),
+        }
 
     return users
 
 
 def save_users(users):
-    users = normalize_user_data(users)
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+    records = []
+    for uname, info in users.items():
+        records.append({
+            "username": uname,
+            "password": info.get("password", ""),
+            "role": info.get("role", "user"),
+            "locked": info.get("locked", False),
+        })
 
-
-def load_users():
-    if USERS_FILE.exists():
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            users = json.load(f)
-    else:
-        users = {}
-
-    users = normalize_user_data(users)
-    save_users(users)
-    return users
+    supabase.table("users").upsert(records).execute()
 
 
 def default_settings():
@@ -89,50 +134,95 @@ def default_settings():
 
 
 def save_settings(settings):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
+    supabase.table("settings").upsert({"id": SETTINGS_ROW_ID, "data": settings}).execute()
 
 
 def load_settings():
-    if SETTINGS_FILE.exists():
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            settings = json.load(f)
+    resp = supabase.table("settings").select("*").eq("id", SETTINGS_ROW_ID).execute()
+
+    if resp.data:
+        data = resp.data[0].get("data") or {}
     else:
-        settings = {}
+        data = {}
 
     base = default_settings()
-    base.update(settings)
-    save_settings(base)
+    base.update(data)
+
+    if not resp.data:
+        save_settings(base)
+
     return base
 
 
-def user_dir(username):
-    d = USERDATA_DIR / username
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def storage_path(username):
+    return f"{username}/data.xlsx"
 
 
-def data_file(username):
-    return user_dir(username) / "data.xlsx"
+def _excel_state_key(username):
+    return f"__excel_exists_{username}"
 
 
-def history_file(username):
-    return user_dir(username) / "history.csv"
+@st.cache_data(show_spinner=False)
+def download_user_excel_bytes(username):
+    # thử tải trực tiếp theo đúng path; nếu file không tồn tại thì Storage sẽ
+    # ném exception, ta bắt lại và coi như user chưa có dữ liệu
+    #
+    # Lưu ý: hàm này cache theo `username` (không theo nội dung file), nên đây
+    # là điểm DUY NHẤT có thể trả dữ liệu cũ sau khi upload/xóa — mọi thao tác
+    # ghi phải gọi kèm reset_excel_cache() để làm mới đúng cache này.
+    try:
+        return supabase.storage.from_(BUCKET_NAME).download(storage_path(username))
+    except Exception:
+        return None
+
+
+def user_has_excel(username):
+    # Ưu tiên trạng thái vừa biết chắc chắn trong phiên hiện tại (vừa upload
+    # hoặc vừa xóa xong) thay vì phụ thuộc thời điểm cache_data được làm mới —
+    # nhờ vậy kết quả đúng ngay lập tức, không cần F5.
+    state_key = _excel_state_key(username)
+    if state_key in st.session_state:
+        return st.session_state[state_key]
+
+    return download_user_excel_bytes(username) is not None
+
+
+def reset_excel_cache(username, exists):
+    # Xóa đúng cache bị ảnh hưởng (không đụng tới cache của user/dữ liệu khác)
+    # và ghi lại trạng thái đã biết vào session_state cho lần kiểm tra tiếp theo
+    # trong phiên này.
+    download_user_excel_bytes.clear()
+    st.session_state[_excel_state_key(username)] = exists
+
+
+def upload_user_excel_bytes(username, file_bytes):
+    # upsert=true => ghi đè file cũ thay vì tạo bản mới
+    supabase.storage.from_(BUCKET_NAME).upload(
+        storage_path(username),
+        file_bytes,
+        file_options={
+            "upsert": "true",
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+    )
+    reset_excel_cache(username, True)
+
+
+def delete_user_excel(username):
+    try:
+        supabase.storage.from_(BUCKET_NAME).remove([storage_path(username)])
+    except Exception:
+        pass
+    reset_excel_cache(username, False)
 
 
 def delete_user_completely(username):
     if username == ADMIN_USER:
         return False
 
-    users = load_users()
-
-    if username in users:
-        del users[username]
-        save_users(users)
-
-    folder = USERDATA_DIR / username
-    if folder.exists():
-        shutil.rmtree(folder)
+    supabase.table("users").delete().eq("username", username).execute()
+    supabase.table("search_history").delete().eq("username", username).execute()
+    delete_user_excel(username)
 
     return True
 
@@ -205,7 +295,6 @@ def find_hs_col(columns):
         if "hs" in str(col).lower():
             return col
     return None
-
 
 
 def token_match_positions(query_tokens, text_tokens):
@@ -340,16 +429,12 @@ def highlight_text(original, query):
 
 # ================= EXCEL =================
 @st.cache_data(show_spinner=False)
-def load_excel_all(path_str):
-    path = Path(path_str)
-    if not path.exists():
-        raise FileNotFoundError("Không tìm thấy file Excel.")
-
-    xf = pd.ExcelFile(path)
+def _parse_excel_all(file_bytes):
+    xf = pd.ExcelFile(BytesIO(file_bytes))
     frames = []
 
     for sheet in xf.sheet_names:
-        df = pd.read_excel(path, sheet_name=sheet, dtype=str)
+        df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet, dtype=str)
         df = df.dropna(how="all")
         if df.empty:
             continue
@@ -362,10 +447,24 @@ def load_excel_all(path_str):
     return pd.concat(frames, ignore_index=True), xf.sheet_names
 
 
+def load_excel_all(username):
+    file_bytes = download_user_excel_bytes(username)
+    if file_bytes is None:
+        raise FileNotFoundError("Không tìm thấy file Excel.")
+    return _parse_excel_all(file_bytes)
+
+
 @st.cache_data(show_spinner=False)
-def load_one_sheet(path_str, sheet_name):
-    df = pd.read_excel(path_str, sheet_name=sheet_name, dtype=str)
+def _parse_one_sheet(file_bytes, sheet_name):
+    df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, dtype=str)
     return df.dropna(how="all")
+
+
+def load_one_sheet(username, sheet_name):
+    file_bytes = download_user_excel_bytes(username)
+    if file_bytes is None:
+        raise FileNotFoundError("Không tìm thấy file Excel.")
+    return _parse_one_sheet(file_bytes, sheet_name)
 
 
 def run_search(query, df):
@@ -395,38 +494,48 @@ def save_history(username, keyword):
     if not keyword:
         return
 
-    path = history_file(username)
-    new = pd.DataFrame([{"Từ khóa": keyword}])
+    # Xóa bản ghi trùng để đưa từ khóa lên đầu (mới nhất)
+    supabase.table("search_history").delete().eq("username", username).eq("keyword", keyword).execute()
+    supabase.table("search_history").insert({"username": username, "keyword": keyword}).execute()
 
-    if path.exists():
-        old = pd.read_csv(path)
-        df = pd.concat([new, old], ignore_index=True)
-    else:
-        df = new
+    resp = (
+        supabase.table("search_history")
+        .select("id")
+        .eq("username", username)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    ids = [r["id"] for r in resp.data]
 
-    df = df.drop_duplicates(subset=["Từ khóa"], keep="first").head(30)
-    df.to_csv(path, index=False)
+    if len(ids) > HISTORY_LIMIT:
+        stale_ids = ids[HISTORY_LIMIT:]
+        supabase.table("search_history").delete().in_("id", stale_ids).execute()
 
 
 def clear_history(username):
-    path = history_file(username)
-    if path.exists():
-        path.unlink()
+    supabase.table("search_history").delete().eq("username", username).execute()
 
 
 def delete_history(username, keyword):
-    path = history_file(username)
-    if not path.exists():
-        return
-    df = pd.read_csv(path)
-    df = df[df["Từ khóa"] != keyword]
-    df.to_csv(path, index=False)
+    supabase.table("search_history").delete().eq("username", username).eq("keyword", keyword).execute()
+
+
+def get_history(username):
+    resp = (
+        supabase.table("search_history")
+        .select("keyword")
+        .eq("username", username)
+        .order("created_at", desc=True)
+        .limit(HISTORY_LIMIT)
+        .execute()
+    )
+    return [row["keyword"] for row in resp.data]
 
 
 # ================= LOGIN =================
 def show_login():
     st.title("🔐 Đăng nhập")
-    users = load_users()
+    ensure_admin_exists()
     settings = load_settings()
     allow_register = settings.get("allow_register", True)
 
@@ -438,19 +547,17 @@ def show_login():
 
         if st.button("Đăng nhập", type="primary", use_container_width=True):
             username = clean_username(username)
+            user = get_user_by_username(username)
 
-            ok_hash = username in users and users[username].get("password") == hash_pw(password)
-            ok_plain = username in users and users[username].get("plain_password") == password
-
-            if ok_hash or ok_plain:
-                if users[username].get("locked", False):
+            if user and verify_pw(password, user.get("password", "")):
+                if user.get("locked", False):
                     st.error("Tài khoản đã bị khóa. Liên hệ admin.")
                     return
 
                 st.session_state.clear()
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
-                st.session_state["role"] = users[username]["role"]
+                st.session_state["role"] = user["role"]
                 st.rerun()
             else:
                 st.error("Sai tài khoản hoặc mật khẩu.")
@@ -459,6 +566,7 @@ def show_login():
         if not allow_register:
             st.warning("Đăng ký tài khoản đang tạm khóa. Liên hệ admin để được tạo tài khoản.")
         else:
+            users = load_users()
             new_user = st.text_input("Tên đăng nhập mới", key="reg_user")
             new_pass = st.text_input("Mật khẩu", type="password", key="reg_pass")
             new_pass2 = st.text_input("Nhập lại mật khẩu", type="password", key="reg_pass2")
@@ -477,12 +585,10 @@ def show_login():
                 else:
                     users[new_user] = {
                         "password": hash_pw(new_pass),
-                        "plain_password": new_pass,
                         "role": "user",
                         "locked": False
                     }
                     save_users(users)
-                    user_dir(new_user)
                     st.success("Tạo tài khoản thành công. Hãy đăng nhập.")
 
 
@@ -509,7 +615,7 @@ def show_admin_panel():
             else:
                 status = "🔴 Đã khóa" if info.get("locked", False) else "🟢 Hoạt động"
                 c3.write(status)
-                c4.code(info.get("plain_password", "Không có MK rõ"))
+                c4.write("🔒 Đã mã hóa")
 
                 if info.get("locked", False):
                     if c5.button("🔓 Mở khóa", key=f"unlock_{uname}"):
@@ -537,7 +643,6 @@ def show_admin_panel():
                         st.warning("Nhập mật khẩu mới trước.")
                     else:
                         users[uname]["password"] = hash_pw(new_pw)
-                        users[uname]["plain_password"] = new_pw
                         save_users(users)
                         st.success(f"Đã reset mật khẩu cho {uname}")
                         st.rerun()
@@ -575,29 +680,30 @@ def show_admin_panel():
             st.warning("Chưa có tài khoản user nào.")
         else:
             target_user = st.selectbox("Chọn user", user_list)
-            path = data_file(target_user)
+            has_data = user_has_excel(target_user)
 
-            if path.exists():
+            if has_data:
                 st.success("User này đã có file dữ liệu.")
 
-                with open(path, "rb") as f:
+                file_bytes = download_user_excel_bytes(target_user)
+
+                if file_bytes:
                     st.download_button(
                         "⬇️ Tải file Excel của user này",
-                        data=f,
+                        data=file_bytes,
                         file_name=f"{target_user}_data.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
                 try:
-                    df, sheets = load_excel_all(str(path))
+                    df, sheets = load_excel_all(target_user)
                     st.write(f"Đọc được **{len(df)} dòng** / **{len(sheets)} sheet**")
                     st.dataframe(df.head(100), use_container_width=True)
                 except Exception as e:
                     st.error(f"Lỗi đọc file: {e}")
 
                 if st.button("🗑 Xóa file dữ liệu user này"):
-                    path.unlink()
-                    st.cache_data.clear()
+                    delete_user_excel(target_user)
                     st.rerun()
             else:
                 st.warning("User này chưa có file dữ liệu.")
@@ -609,9 +715,7 @@ def show_admin_panel():
             )
 
             if uploaded:
-                with open(path, "wb") as f:
-                    f.write(uploaded.getbuffer())
-                st.cache_data.clear()
+                upload_user_excel_bytes(target_user, uploaded.getvalue())
                 st.success("Đã upload file.")
                 st.rerun()
 
@@ -647,17 +751,16 @@ def show_admin_panel():
 # ================= SEARCH =================
 def show_search_page(username):
     st.title("🔎 Tra cứu mã HS")
-    path = data_file(username)
     settings = load_settings()
 
     search_key = f"search_text_{username}"
 
-    if not path.exists():
+    if not user_has_excel(username):
         st.info("Chưa có file dữ liệu. Upload Excel ở sidebar trước.")
         return
 
     try:
-        df, sheets = load_excel_all(str(path))
+        df, sheets = load_excel_all(username)
     except Exception as e:
         st.error(f"Lỗi đọc Excel: {e}")
         return
@@ -746,17 +849,15 @@ def show_search_page(username):
 
     else:
         if settings.get("show_history", True):
-            hpath = history_file(username)
-            if hpath.exists():
-                hist = pd.read_csv(hpath)
+            history_list = get_history(username)
 
+            if history_list:
                 with st.expander("🕘 Lịch sử tìm kiếm", expanded=True):
                     if st.button("🧹 Xóa toàn bộ lịch sử", key=f"clear_history_{username}"):
                         clear_history(username)
                         st.rerun()
 
-                    for i, r in hist.iterrows():
-                        kw = r["Từ khóa"]
+                    for i, kw in enumerate(history_list):
                         c1, c2, c3 = st.columns([5, 1, 1])
                         c1.write(kw)
 
@@ -772,14 +873,13 @@ def show_search_page(username):
 # ================= SHEET =================
 def show_sheet_page(username):
     st.title("📋 Xem dữ liệu sheet")
-    path = data_file(username)
 
-    if not path.exists():
+    if not user_has_excel(username):
         st.info("Chưa có file dữ liệu.")
         return
 
     try:
-        _, sheets = load_excel_all(str(path))
+        _, sheets = load_excel_all(username)
     except Exception as e:
         st.error(f"Lỗi đọc Excel: {e}")
         return
@@ -791,7 +891,7 @@ def show_sheet_page(username):
     selected_sheet = st.selectbox("Chọn sheet", sheets, key=f"sheet_select_{username}")
 
     try:
-        df = load_one_sheet(str(path), selected_sheet)
+        df = load_one_sheet(username, selected_sheet)
     except Exception as e:
         st.error(f"Lỗi đọc sheet: {e}")
         return
@@ -870,7 +970,6 @@ def show_sheet_page(username):
 def show_main_app():
     username = st.session_state["username"]
     role = st.session_state["role"]
-    path = data_file(username)
     settings = load_settings()
 
     with st.sidebar:
@@ -883,7 +982,9 @@ def show_main_app():
             st.markdown("---")
             st.markdown("### 📁 File dữ liệu")
 
-            if path.exists():
+            has_data = user_has_excel(username)
+
+            if has_data:
                 st.success("✅ Đã có file dữ liệu")
             else:
                 st.warning("Chưa có file dữ liệu")
@@ -891,17 +992,16 @@ def show_main_app():
             uploaded = st.file_uploader("Upload file Excel", type=["xlsx"], key=f"upload_{username}")
 
             if uploaded:
-                with open(path, "wb") as f:
-                    f.write(uploaded.getbuffer())
-                st.cache_data.clear()
+                upload_user_excel_bytes(username, uploaded.getvalue())
                 st.success("Đã lưu file Excel.")
                 st.rerun()
 
-            if path.exists() and settings.get("allow_user_download", True):
-                with open(path, "rb") as f:
+            if has_data and settings.get("allow_user_download", True):
+                file_bytes = download_user_excel_bytes(username)
+                if file_bytes:
                     st.download_button(
                         "⬇️ Tải file hiện tại",
-                        data=f,
+                        data=file_bytes,
                         file_name=f"{username}_data.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"download_{username}"
@@ -918,7 +1018,7 @@ def show_main_app():
                     if st.button("Lưu mật khẩu", key=f"save_pw_{username}"):
                         users = load_users()
 
-                        ok_old = users[username].get("password") == hash_pw(old_pw) or users[username].get("plain_password") == old_pw
+                        ok_old = verify_pw(old_pw, users[username].get("password", ""))
 
                         if not ok_old:
                             st.error("Mật khẩu cũ sai.")
@@ -928,7 +1028,6 @@ def show_main_app():
                             st.error("Mật khẩu mới không khớp.")
                         else:
                             users[username]["password"] = hash_pw(new_pw)
-                            users[username]["plain_password"] = new_pw
                             save_users(users)
                             st.success("Đã đổi mật khẩu.")
 
