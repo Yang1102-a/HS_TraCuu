@@ -14,11 +14,17 @@ BUCKET_NAME = "userdata"
 SETTINGS_ROW_ID = 1
 HISTORY_LIMIT = 30
 
+# Các cột nội bộ, không cho chọn trong phần tùy chỉnh
+INTERNAL_COLS = ("Sheet", "__sheet_order", "Tên tìm kiếm", "Điểm giống")
+
 st.markdown("""
 <style>
 .stApp { background:#0f1117; color:#eee; }
 .card { border:1px solid #333846; border-radius:16px; padding:16px; margin-bottom:12px; background:#171a22; }
+.hs-line { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
 .hs { font-size:25px; font-weight:800; color:#7CFFB2; }
+.vat { font-size:18px; font-weight:700; color:#FFD166; background:#2a2412; border:1px solid #5c4a14; border-radius:10px; padding:2px 12px; }
+.vat-empty { color:#888; background:#1d1f27; border-color:#333846; font-weight:500; }
 .score { color:#aaa; font-size:13px; }
 mark { background:#ffe066; color:black; padding:2px 4px; border-radius:4px; }
 </style>
@@ -158,6 +164,10 @@ def storage_path(username):
     return f"{username}/data.xlsx"
 
 
+def prefs_path(username):
+    return f"{username}/prefs.json"
+
+
 def _excel_state_key(username):
     return f"__excel_exists_{username}"
 
@@ -216,6 +226,40 @@ def delete_user_excel(username):
     reset_excel_cache(username, False)
 
 
+# ================= PREFS (tùy chỉnh tìm kiếm / thẻ, lưu theo user) =================
+def load_prefs(username):
+    # Cache trong session để không phải tải lại mỗi lần rerun
+    cache_key = f"__prefs_{username}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+
+    prefs = {}
+    try:
+        raw = supabase.storage.from_(BUCKET_NAME).download(prefs_path(username))
+        data = json.loads(raw.decode("utf-8"))
+        if isinstance(data, dict):
+            prefs = data
+    except Exception:
+        prefs = {}
+
+    st.session_state[cache_key] = prefs
+    return prefs
+
+
+def save_prefs(username, prefs):
+    st.session_state[f"__prefs_{username}"] = prefs
+    try:
+        supabase.storage.from_(BUCKET_NAME).upload(
+            prefs_path(username),
+            json.dumps(prefs, ensure_ascii=False).encode("utf-8"),
+            file_options={"upsert": "true", "content-type": "application/json"},
+        )
+        return True
+    except Exception:
+        # Không lưu được lên Storage thì vẫn giữ trong phiên hiện tại
+        return False
+
+
 def delete_user_completely(username):
     if username == ADMIN_USER:
         return False
@@ -223,6 +267,11 @@ def delete_user_completely(username):
     supabase.table("users").delete().eq("username", username).execute()
     supabase.table("search_history").delete().eq("username", username).execute()
     delete_user_excel(username)
+
+    try:
+        supabase.storage.from_(BUCKET_NAME).remove([prefs_path(username)])
+    except Exception:
+        pass
 
     return True
 
@@ -274,6 +323,37 @@ def format_hs(value):
     return re.sub(r"\D", "", s)
 
 
+def format_vat(value):
+    """
+    Chuẩn hóa giá trị VAT để hiển thị:
+      0.08 -> 8%   |  8 -> 8%  |  "8%" -> 8%  |  "0,1" -> 10%  |  rỗng -> ""
+    """
+    if value is None or pd.isna(value):
+        return ""
+
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return ""
+
+    if s.endswith("%"):
+        num = s[:-1].strip().replace(",", ".")
+        try:
+            f = float(num)
+            return f"{f:g}%"
+        except ValueError:
+            return s
+
+    try:
+        f = float(s.replace(",", "."))
+    except ValueError:
+        return s  # giữ nguyên nếu là chữ (vd: "KCT", "Không chịu thuế")
+
+    if f < 1:
+        f = f * 100  # dạng phân số: 0.08 -> 8
+
+    return f"{f:g}%"
+
+
 def find_name_col(columns):
     keys = ["tên hàng", "ten hang", "mô tả", "mo ta", "description", "name", "tên", "ten"]
     for key in keys:
@@ -295,6 +375,47 @@ def find_hs_col(columns):
         if "hs" in str(col).lower():
             return col
     return None
+
+
+def find_vat_col(columns):
+    """
+    Tìm cột thuế VAT. Ưu tiên header có chữ 'vat', sau đó 'gtgt'.
+    Ví dụ: "Thuế VAT", "VAT (%)", "VAT", "Thuế GTGT".
+    """
+    cols = list(columns)
+
+    for col in cols:
+        t = normalize_text(col).replace(" ", "")
+        if t == "vat":
+            return col
+
+    for col in cols:
+        if "vat" in normalize_text(col).split():
+            return col
+
+    for col in cols:
+        t = normalize_text(col).replace(" ", "")
+        if "vat" in t or "gtgt" in t:
+            return col
+
+    return None
+
+
+def most_common_nonempty(series):
+    s = series.dropna().astype(str).str.strip()
+    s = s[s != ""]
+    if s.empty:
+        return ""
+    return s.value_counts().index[0]
+
+
+def vat_badge_html(vat_col, vat_value):
+    # Không có cột VAT trong file => không hiện gì
+    if not vat_col:
+        return ""
+    if vat_value:
+        return f'<span class="vat">VAT: {html.escape(str(vat_value))}</span>'
+    return '<span class="vat vat-empty">VAT: —</span>'
 
 
 def token_match_positions(query_tokens, text_tokens):
@@ -433,12 +554,15 @@ def _parse_excel_all(file_bytes):
     xf = pd.ExcelFile(BytesIO(file_bytes))
     frames = []
 
-    for sheet in xf.sheet_names:
+    for sheet_order, sheet in enumerate(xf.sheet_names):
         df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet, dtype=str)
         df = df.dropna(how="all")
         if df.empty:
             continue
         df["Sheet"] = sheet
+        # Sheet nằm càng sau trong file thì càng mới / đáng tin hơn -> dùng để
+        # ưu tiên khi độ giống bằng nhau (xem run_search)
+        df["__sheet_order"] = sheet_order
         frames.append(df)
 
     if not frames:
@@ -467,25 +591,54 @@ def load_one_sheet(username, sheet_name):
     return _parse_one_sheet(file_bytes, sheet_name)
 
 
-def run_search(query, df):
+def run_search(query, df, search_cols=None):
     name_col = find_name_col(df.columns)
     hs_col = find_hs_col(df.columns)
+    vat_col = find_vat_col(df.columns)
 
     if not name_col:
         raise Exception("Không tìm thấy cột tên hàng.")
     if not hs_col:
         raise Exception("Không tìm thấy cột mã HS.")
 
+    # Cột dùng để tìm: lấy theo lựa chọn của user, không có thì mặc định cột tên hàng
+    cols = [c for c in (search_cols or []) if c in df.columns]
+    if not cols:
+        cols = [name_col]
+
     result = df.copy()
     result[hs_col] = result[hs_col].apply(format_hs)
-    result["Tên tìm kiếm"] = result[name_col].fillna("").astype(str)
-    result["Điểm giống"] = result["Tên tìm kiếm"].apply(lambda x: similarity_score(query, x))
+
+    if vat_col:
+        result[vat_col] = result[vat_col].apply(format_vat)
+
+    # Điểm của mỗi dòng = điểm cao nhất trong các cột được chọn để tìm
+    score_series = []
+    for c in cols:
+        score_series.append(
+            result[c].fillna("").astype(str).apply(lambda x: similarity_score(query, x))
+        )
+    result["Điểm giống"] = pd.concat(score_series, axis=1).max(axis=1)
 
     result = result[result["Điểm giống"] >= 25].copy()
-    result = result.sort_values("Điểm giống", ascending=False)
-    result = result.drop_duplicates(subset=[name_col, hs_col], keep="first")
 
-    return result.head(100), name_col, hs_col
+    # Cùng điểm giống thì sheet nằm sau (mới hơn, đáng tin hơn) được ưu tiên
+    # hiện lên trước.
+    if "__sheet_order" in result.columns:
+        sort_cols = ["Điểm giống", "__sheet_order"]
+        sort_asc = [False, False]
+    else:
+        sort_cols = ["Điểm giống"]
+        sort_asc = [False]
+
+    result = result.sort_values(sort_cols, ascending=sort_asc)
+
+    # Khác VAT hoặc khác nội dung ở các cột tìm kiếm thì coi là dòng khác nhau
+    dedup_cols = [name_col, hs_col] + ([vat_col] if vat_col else []) + cols
+    dedup_cols = list(dict.fromkeys(dedup_cols))
+    result = result.drop_duplicates(subset=dedup_cols, keep="first")
+
+    return result.head(100), name_col, hs_col, vat_col
 
 
 # ================= HISTORY =================
@@ -698,7 +851,10 @@ def show_admin_panel():
                 try:
                     df, sheets = load_excel_all(target_user)
                     st.write(f"Đọc được **{len(df)} dòng** / **{len(sheets)} sheet**")
-                    st.dataframe(df.head(100), use_container_width=True)
+                    st.dataframe(
+                        df.head(100).drop(columns=["__sheet_order"], errors="ignore"),
+                        use_container_width=True
+                    )
                 except Exception as e:
                     st.error(f"Lỗi đọc file: {e}")
 
@@ -749,6 +905,12 @@ def show_admin_panel():
 
 
 # ================= SEARCH =================
+def _reset_search_prefs(username, sc_key, dc_key, default_search, default_display):
+    # Chạy dạng callback (trước khi widget được tạo lại) nên được phép sửa session_state
+    st.session_state[sc_key] = list(default_search)
+    st.session_state[dc_key] = list(default_display)
+
+
 def show_search_page(username):
     st.title("🔎 Tra cứu mã HS")
     settings = load_settings()
@@ -771,6 +933,7 @@ def show_search_page(username):
 
     name_col = find_name_col(df.columns)
     hs_col = find_hs_col(df.columns)
+    vat_col = find_vat_col(df.columns)
 
     st.caption(f"Đọc được **{len(df)} dòng** / **{len(sheets)} sheet**")
 
@@ -784,8 +947,74 @@ def show_search_page(username):
         st.write("Các cột đang có:", list(df.columns))
         return
 
-    st.caption(f"Cột tên hàng: **{name_col}** | Cột mã HS: **{hs_col}**")
+    vat_caption = f" | Cột VAT: **{vat_col}**" if vat_col else " | ⚠️ Không thấy cột VAT (header cần chứa chữ VAT hoặc GTGT)"
+    st.caption(f"Cột tên hàng: **{name_col}** | Cột mã HS: **{hs_col}**{vat_caption}")
 
+    # ---------- TÙY CHỈNH TÌM KIẾM & THẺ (lưu cố định theo user) ----------
+    col_options = [c for c in df.columns if c not in INTERNAL_COLS]
+
+    default_search = [name_col]
+    default_display = [c for c in [name_col, vat_col] if c]
+
+    prefs = load_prefs(username)
+    sc_key = f"pref_search_cols_{username}"
+    dc_key = f"pref_display_cols_{username}"
+    sig_key = f"__prefs_sig_{username}"
+
+    # Lần đầu trong phiên: nạp từ cấu hình đã lưu (bỏ cột không còn tồn tại trong file)
+    if sc_key not in st.session_state:
+        saved = [c for c in prefs.get("search_cols", []) if c in col_options]
+        st.session_state[sc_key] = saved or list(default_search)
+    else:
+        st.session_state[sc_key] = [c for c in st.session_state[sc_key] if c in col_options]
+
+    if dc_key not in st.session_state:
+        if "display_cols" in prefs:
+            st.session_state[dc_key] = [c for c in prefs["display_cols"] if c in col_options]
+        else:
+            st.session_state[dc_key] = list(default_display)
+    else:
+        st.session_state[dc_key] = [c for c in st.session_state[dc_key] if c in col_options]
+
+    with st.expander("⚙️ Tùy chỉnh tìm kiếm & thẻ kết quả", expanded=False):
+        st.multiselect(
+            "Tìm theo cột nào?",
+            col_options,
+            key=sc_key,
+            help="Chọn 1 hoặc nhiều cột. Dòng nào khớp ở BẤT KỲ cột nào được chọn sẽ hiện ra "
+                 "(lấy điểm cao nhất). Để trống = tìm theo cột tên hàng."
+        )
+        st.multiselect(
+            "Thẻ kết quả hiện những cột nào?",
+            col_options,
+            key=dc_key,
+            help="Mã HS luôn hiện ở đầu thẻ. Cột VAT (nếu chọn) hiện thành ô vàng cạnh mã HS. "
+                 "Các cột còn lại hiện theo đúng thứ tự bạn chọn."
+        )
+        st.button(
+            "↩️ Về mặc định",
+            key=f"reset_prefs_{username}",
+            on_click=_reset_search_prefs,
+            args=(username, sc_key, dc_key, default_search, default_display),
+        )
+        st.caption("Lựa chọn được lưu cố định cho tài khoản này — xóa ô tìm kiếm hay đăng nhập lại vẫn giữ nguyên.")
+
+    search_cols = st.session_state[sc_key] or list(default_search)
+    display_cols = list(st.session_state[dc_key])
+
+    # Lưu khi có thay đổi (so với lần lưu/nạp gần nhất)
+    new_prefs = {"search_cols": list(st.session_state[sc_key]), "display_cols": display_cols}
+    new_sig = json.dumps(new_prefs, sort_keys=True, ensure_ascii=False)
+
+    if sig_key not in st.session_state:
+        st.session_state[sig_key] = new_sig
+    elif st.session_state[sig_key] != new_sig:
+        ok = save_prefs(username, new_prefs)
+        st.session_state[sig_key] = new_sig
+        if not ok:
+            st.warning("Không lưu được tùy chỉnh lên máy chủ — tạm thời chỉ giữ trong phiên này.")
+
+    # ---------- Ô TÌM KIẾM ----------
     if search_key not in st.session_state:
         st.session_state[search_key] = ""
 
@@ -807,7 +1036,7 @@ def show_search_page(username):
         save_history(username, query)
 
         try:
-            result, name_col, hs_col = run_search(query, df)
+            result, name_col, hs_col, vat_col = run_search(query, df, search_cols)
         except Exception as e:
             st.error(f"Lỗi tìm kiếm: {e}")
             return
@@ -819,10 +1048,20 @@ def show_search_page(username):
         hs_stats = result[hs_col].value_counts().reset_index()
         hs_stats.columns = ["Mã HS", "Số lần xuất hiện"]
 
+        # Thêm cột VAT vào thống kê (VAT xuất hiện nhiều nhất của từng mã HS)
+        if vat_col:
+            vat_by_hs = result.groupby(hs_col)[vat_col].agg(most_common_nonempty)
+            hs_stats["VAT"] = hs_stats["Mã HS"].map(vat_by_hs).fillna("")
+
         best_hs = hs_stats.iloc[0]["Mã HS"]
         best_count = hs_stats.iloc[0]["Số lần xuất hiện"]
 
-        st.success(f"💡 Gợi ý mã đáng tin nhất: **{best_hs}** — xuất hiện {best_count} lần")
+        best_vat_text = ""
+        if vat_col:
+            best_vat = hs_stats.iloc[0]["VAT"]
+            best_vat_text = f" | VAT: **{best_vat if best_vat else '—'}**"
+
+        st.success(f"💡 Gợi ý mã đáng tin nhất: **{best_hs}**{best_vat_text} — xuất hiện {best_count} lần")
 
         with st.expander("📊 Thống kê mã HS"):
             st.dataframe(hs_stats, use_container_width=True, hide_index=True)
@@ -831,20 +1070,42 @@ def show_search_page(username):
 
         for _, row in result.iterrows():
             hs = html.escape(str(row[hs_col]))
-            name = highlight_text(row[name_col], query)
             score = round(float(row["Điểm giống"]), 1)
             sheet = html.escape(str(row.get("Sheet", "")))
 
-            st.markdown(f"""
-            <div class="card">
-                <div class="hs">Mã HS: {hs}</div>
-                <p><b>Tên hàng:</b> {name}</p>
-                <p class="score">Độ giống: {score}% | Sheet: {sheet}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            # Ô VAT cạnh mã HS (chỉ khi cột VAT được chọn hiển thị)
+            vat_html = ""
+            if vat_col and vat_col in display_cols:
+                vat_html = vat_badge_html(vat_col, row[vat_col])
+
+            # Các cột còn lại theo đúng thứ tự user chọn
+            extra_html = ""
+            for col in display_cols:
+                if col == hs_col or col == vat_col:
+                    continue
+
+                val = row.get(col, "")
+                if pd.isna(val) or str(val).strip() == "":
+                    continue
+
+                if col in search_cols:
+                    shown = highlight_text(val, query)
+                else:
+                    shown = html.escape(str(val))
+
+                extra_html += f"<p><b>{html.escape(str(col))}:</b> {shown}</p>"
+
+            card_html = (
+                '<div class="card">'
+                f'<div class="hs-line"><span class="hs">Mã HS: {hs}</span>{vat_html}</div>'
+                f'{extra_html}'
+                f'<p class="score">Độ giống: {score}% | Sheet: {sheet}</p>'
+                '</div>'
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
 
             with st.expander("Xem toàn bộ dòng"):
-                show_row = row.drop(labels=["Tên tìm kiếm", "Điểm giống"], errors="ignore")
+                show_row = row.drop(labels=["Tên tìm kiếm", "Điểm giống", "__sheet_order"], errors="ignore")
                 st.write(show_row.to_frame("Giá trị"))
 
     else:
@@ -904,6 +1165,10 @@ def show_sheet_page(username):
     if hs_col:
         df[hs_col] = df[hs_col].apply(format_hs)
 
+    vat_col = find_vat_col(df.columns)
+    if vat_col:
+        df[vat_col] = df[vat_col].apply(format_vat)
+
     st.caption(f"Sheet **{selected_sheet}** — {len(df)} dòng")
 
     detail_key = f"opened_row_{username}_{selected_sheet}"
@@ -933,6 +1198,7 @@ def show_sheet_page(username):
 
         name = str(row[name_col]) if name_col else "—"
         hs = str(row[hs_col]) if hs_col else "—"
+        vat_html = vat_badge_html(vat_col, row[vat_col] if vat_col else "")
 
         c1, c2, c3 = st.columns([1, 1, 4])
 
@@ -950,13 +1216,14 @@ def show_sheet_page(username):
                 st.session_state[detail_key] = idx + 1
                 st.rerun()
 
-        st.markdown(f"""
-        <div class="card">
-            <div class="hs">Mã HS: {html.escape(hs)}</div>
-            <p><b>Tên hàng:</b><br>{html.escape(name)}</p>
-            <p class="score">Sheet: {html.escape(selected_sheet)} | Dòng: {idx + 1}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        card_html = (
+            '<div class="card">'
+            f'<div class="hs-line"><span class="hs">Mã HS: {html.escape(hs)}</span>{vat_html}</div>'
+            f'<p><b>Tên hàng:</b><br>{html.escape(name)}</p>'
+            f'<p class="score">Sheet: {html.escape(selected_sheet)} | Dòng: {idx + 1}</p>'
+            '</div>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
         st.write(row.to_frame("Giá trị"))
 
